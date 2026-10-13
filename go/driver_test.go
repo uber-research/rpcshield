@@ -483,6 +483,10 @@ go_standard:
 	aiClient := genaimock.NewMockClient(ctrl)
 	driver := NewDriver(tempDir, runner, gp, serviceMapper, aiClient, []grail.Service{{Name: "some-service", Tier: 1}}, nil /* productionTrafficRecords */, nil /* logger */, _defaultDriverOptions)
 
+	// resolveTargetImportPath runs `bazel query 'labels("embed", TARGET)'` once per target before
+	// the GOPATH-lift path; the mock returns an error so the resolver falls back to the dir-based
+	// derivation and the rest of the test proceeds as before.
+	runner.EXPECT().Run(gomock.Any()).Return(errors.New("mock: no bazel"))
 	// Mock LiftGoPath to return a valid path
 	gp.EXPECT().LiftGoPath(gomock.Any(), gomock.Any()).Return("/path/to/invalid/gopath", nil, nil)
 
@@ -529,6 +533,11 @@ go_standard:
 
 			ctrl := gomock.NewController(t)
 			runner := utilsmock.NewMockRunner(ctrl)
+			// resolveTargetImportPath runs `bazel query 'labels("embed", TARGET)'` per target before
+			// dispatching to either loader; the mock returns an error so the resolver falls back to
+			// the dir-based derivation. AnyTimes: scenarios that fail before the target loop never
+			// reach the resolver.
+			runner.EXPECT().Run(gomock.Any()).Return(errors.New("mock: no bazel")).AnyTimes()
 			gp := bazelmock.NewMockGoPathWrapper(ctrl)
 
 			allServices := []grail.Service{{Name: "some-service", Tier: 2}}
