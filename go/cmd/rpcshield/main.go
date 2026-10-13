@@ -135,6 +135,7 @@ func main() {
 		disableParallelCallTree := wpaFlags.Bool("disable-parallel-calltree", false, "disable parallel call tree computation, default is false")
 		permutationThreshold := wpaFlags.Int64("permutation-threshold", 100, "number of times the same function-set hash must be observed reaching a sink before permutation detection triggers (0 to disable)")
 		tierOverridesRaw := wpaFlags.String("tier-overrides", os.Getenv("TIER_OVERRIDES"), "comma-separated list of service:tier overrides (e.g., svc1:0,svc2:1)")
+		loaderMode := wpaFlags.String("loader-mode", "", "force package-loading mode for this run: \"bazel\" or \"gopath\" (overrides the BazelLoaderServices allowlist); empty preserves the per-service allowlist behavior")
 
 		if err := wpaFlags.Parse(os.Args[2:]); err != nil || *service == "" || *workspace == "" {
 			fmt.Println("Usage of the program:")
@@ -166,6 +167,9 @@ func main() {
 
 		analyzersMap := parseAnalyzerOptions(*analyzers)
 
+		if *loaderMode != "" && *loaderMode != "bazel" && *loaderMode != "gopath" {
+			log.Fatalf("invalid -loader-mode %q: must be \"\", \"bazel\", or \"gopath\"", *loaderMode)
+		}
 		opts := wpamode.Options{
 			Service:                      *service,
 			Workspace:                    *workspace,
@@ -200,6 +204,7 @@ func main() {
 			DisableParallelCallTree:      *disableParallelCallTree,
 			PermutationThreshold:         *permutationThreshold,
 			TierOverrides:                tierOverrides,
+			ForceLoaderMode:              *loaderMode,
 			Analyzers:                    analyzersMap,
 		}
 		if _, err := wpamode.Run(opts); err != nil {
