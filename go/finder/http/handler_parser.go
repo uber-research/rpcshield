@@ -159,6 +159,33 @@ func (p *HandlerParser) handlerFuncsFrom(f *ssa.Function) ([]handler, error) {
 
 	switch x := rf.(type) {
 	case *ssa.Function:
+		// Determine whether the leaf function is source-loadable in the
+		// codebase. If not -- stdlib, archive-only dep, or a synthetic
+		// interface-method thunk -- we cannot map it to AST/SSA downstream,
+		// and recording it as-is produces phantom inbound entries that fail
+		// populateSSAInbounds' sig2ast lookup.
+		//
+		// This happens most visibly when Go source takes a method value on
+		// an interface-typed receiver (e.g. `params.HTTPHandler.ServeHTTP`
+		// where HTTPHandler is `http.Handler`): SSA resolves the leaf to
+		// the interface method itself, whose declaring package is `net/http`
+		// (stdlib, no source loaded). The `*ssa.Call` branch below already
+		// handles interface-typed dynamic dispatch by resolving to concrete
+		// impls in the codebase; we do the same here so method-value
+		// registrations get the same treatment.
+		pkg, hasPkg := p.codebase.PkgMap[x.Pkg.Pkg.Path()]
+		if !hasPkg || len(pkg.Syntax) == 0 {
+			if recv := x.Signature.Recv(); recv != nil {
+				if iface, ok := recv.Type().Underlying().(*types.Interface); ok {
+					objs = append(objs, p.findImplementationsOfInterface(iface, x.Name())...)
+					break
+				}
+			}
+			// Concrete method on a source-less type (e.g. *http.ServeMux.ServeHTTP)
+			// with no interface to resolve through. Skip rather than record
+			// a phantom that would fail downstream mapping.
+			return nil, nil
+		}
 		obj := unwrapFuncObj(f)
 		if obj == nil {
 			return nil, fmt.Errorf("True source function %v returned a nil *types.Func object", f)
@@ -182,10 +209,29 @@ func (p *HandlerParser) handlerFuncsFrom(f *ssa.Function) ([]handler, error) {
 		}
 	}
 
-	// Keep only those funcs that are likely handlers for this framework
+	// Keep only those funcs that (a) match this framework's handler signature AND
+	// (b) live in a source-loaded package. The second condition drops phantom
+	// entries whose *types.Func is rooted in stdlib (or any archive-only dep) --
+	// most commonly interface-method thunks reached via a synthetic bound wrapper,
+	// and stdlib methods promoted through codebase types that embed an
+	// http.Handler / *http.ServeMux / http.HandlerFunc field. Downstream
+	// populateSSAInbounds needs the func's AST for sig2ast lookup, and stdlib
+	// packages ship without loaded source, so recording these would fail the
+	// strict all-or-nothing SSA-mapping invariant with no real handler behind them.
 	objs = xslice.FilterInPlace(objs, func(h handler) bool {
 		sig, ok := h.obj.Type().(*types.Signature)
-		return ok && p.isHandlerSig(sig)
+		if !ok || !p.isHandlerSig(sig) {
+			return false
+		}
+		ownerPkg := h.obj.Pkg()
+		if ownerPkg == nil {
+			return false
+		}
+		pkg, ok := p.codebase.PkgMap[ownerPkg.Path()]
+		if !ok || len(pkg.Syntax) == 0 {
+			return false
+		}
+		return true
 	})
 
 	return objs, nil

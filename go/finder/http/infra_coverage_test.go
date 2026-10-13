@@ -145,6 +145,14 @@ func TestHTTPInboundFinder__EmbeddedRouterAndInterfaceBoxing(t *testing.T) {
 		{PkgPath: muxinfraPkg, FullFuncName: muxinfraPkg + ".homeHandler", CanonicalName: "/promoted"},
 		// Interface-boxed http.HandlerFunc -> MakeInterface unwrapping.
 		{PkgPath: muxinfraPkg, FullFuncName: muxinfraPkg + ".pingHandler", CanonicalName: "/boxed"},
+		// Interface-typed method value -> the source-less leaf (net/http's
+		// abstract Handler.ServeHTTP) is resolved to the concrete codebase
+		// implementation. embedHandler also implements http.Handler, but only
+		// through a promoted net/http method, so it is filtered out.
+		{PkgPath: muxinfraPkg, FullFuncName: "(" + muxinfraPkg + ".appHandler).ServeHTTP", CanonicalName: "/ifacevalue"},
+		// NOTE: "/wrapped" (a call whose candidates are all empty) and
+		// "/sourceless" (a method value on *http.ServeMux) intentionally yield
+		// no inbounds.
 	}
 
 	got := make([]InboundRepr, 0, len(ibs))
