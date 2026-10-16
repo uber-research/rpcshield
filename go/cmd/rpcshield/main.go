@@ -135,6 +135,7 @@ func main() {
 		disableParallelCallTree := wpaFlags.Bool("disable-parallel-calltree", false, "disable parallel call tree computation, default is false")
 		permutationThreshold := wpaFlags.Int64("permutation-threshold", 100, "number of times the same function-set hash must be observed reaching a sink before permutation detection triggers (0 to disable)")
 		tierOverridesRaw := wpaFlags.String("tier-overrides", os.Getenv("TIER_OVERRIDES"), "comma-separated list of service:tier overrides (e.g., svc1:0,svc2:1)")
+		canonicalEdgeOrder := wpaFlags.Bool("canonical-edge-order", false, "sort call-graph outgoing edges deterministically before path exploration so convergence pruning does not depend on package load order")
 		loaderMode := wpaFlags.String("loader-mode", "", "force package-loading mode for this run: \"bazel\" or \"gopath\" (overrides the BazelLoaderServices allowlist); empty preserves the per-service allowlist behavior")
 
 		if err := wpaFlags.Parse(os.Args[2:]); err != nil || *service == "" || *workspace == "" {
@@ -205,6 +206,7 @@ func main() {
 			PermutationThreshold:         *permutationThreshold,
 			TierOverrides:                tierOverrides,
 			ForceLoaderMode:              *loaderMode,
+			CanonicalEdgeOrder:           *canonicalEdgeOrder,
 			Analyzers:                    analyzersMap,
 		}
 		if _, err := wpamode.Run(opts); err != nil {

@@ -126,6 +126,8 @@ type Options struct {
 	// "bazel" forces the BazelLoader path, "gopath" forces GoPathWrapper.LiftGoPath. Empty keeps
 	// the per-service allowlist behavior.
 	ForceLoaderMode string
+	// CanonicalEdgeOrder sorts call-graph outgoing edges deterministically before path exploration.
+	CanonicalEdgeOrder bool
 	// TierOverrides is a map of service name to tier number for overriding Grail-sourced tiers.
 	TierOverrides map[string]int
 	// ExtraExcludePackagePatterns is passed straight through to
@@ -391,6 +393,7 @@ func Run(options Options) (rpcshield.Result, error) {
 		CheckIsomorphism:        options.CheckIsomorphism,
 		PermutationThreshold:    options.PermutationThreshold,
 		ForceLoaderMode:         options.ForceLoaderMode,
+		CanonicalEdgeOrder:      options.CanonicalEdgeOrder,
 		KeepIBPkgs:              keepIBPkgs,
 		KeepGoPathAfterRun:      options.KeepGoPathAfterRun,
 		BazelLoader:             options.BazelLoader,

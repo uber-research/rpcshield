@@ -166,6 +166,10 @@ type DriverOptions struct {
 	// for this run: "bazel" forces every target through the BazelLoader path, "gopath" forces every
 	// target through GoPathWrapper.LiftGoPath. Empty (the default) preserves the allowlist behavior.
 	ForceLoaderMode string
+	// CanonicalEdgeOrder sorts every call-graph node's outgoing edges into a deterministic
+	// order before path exploration, so convergence pruning does not depend on package load
+	// order. Opt-in; see graph.Config.CanonicalEdgeOrder.
+	CanonicalEdgeOrder bool
 	// PackageSource, when set, is called once per target instead of the default
 	// BazelLoader-or-GoPathWrapper+loader.LoadAll pipeline, to obtain packages/SSA for that target.
 	// This is the seam for callers who already have prepared source (a pre-lifted GOPATH directory,
@@ -667,6 +671,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			RTAFlavor:               rtaFlavor,
 			RTANumWorkers:           rtaNumWorkers,
 			PermutationThreshold:    d.opts.PermutationThreshold,
+			CanonicalEdgeOrder:      d.opts.CanonicalEdgeOrder,
 			CodebasePkgPrefix:       d.opts.Config.CodebasePkgPrefix,
 			SafeGoPkgPath:           d.opts.Config.SafeGoPkgPath,
 		}
