@@ -473,6 +473,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			result.RunMetrics[_pkgCount] += float64(len(pkgs))
 
 			// Generating SSA packages.
+			repairIllTypedPropagationFromSourcelessPkgs(pkgs)
 			ssaProg, _ = ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
 			ssaPkgs = ssaProg.AllPackages()
 			ssaProg.Build()
@@ -514,6 +515,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			runtime.GC()
 
 			// Generating SSA packages.
+			repairIllTypedPropagationFromSourcelessPkgs(pkgs)
 			ssaProg, ssaPkgs = ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
 			// Build the SSA program; needed for getting generics instantiated and funclits resolved.
 			// Also needed for call graph construction.
@@ -966,6 +968,7 @@ func (d *Driver) RunOnGoPath(ctx context.Context, curService grail.Service, targ
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		repairIllTypedPropagationFromSourcelessPkgs(pkgs)
 		ssaProg, ssaPkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
 		ssaProg.Build()
 		return pkgs, ssaPkgs, ssaProg, nil
@@ -981,6 +984,7 @@ func (d *Driver) RunOnPackages(ctx context.Context, curService grail.Service, ta
 	clone.AllServices = []grail.Service{curService}
 	clone.opts.Targets = targets
 	clone.opts.PackageSource = func(string) ([]*packages.Package, []*ssa.Package, *ssa.Program, error) {
+		repairIllTypedPropagationFromSourcelessPkgs(pkgs)
 		ssaProg, ssaPkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
 		ssaProg.Build()
 		return pkgs, ssaPkgs, ssaProg, nil
@@ -1612,6 +1616,20 @@ func (d *Driver) dumpPackageDiagnostics(pkgs []*packages.Package, ssaProg *ssa.P
 
 		if ssaProg.Package(p.Types) == nil {
 			d.Logger.Infow("dumpPackageDiagnostic", "PkgName", p.Name, "PkgPath", p.PkgPath, "TypeInfoLen", typeInf)
+
+			if isSourcelessBuildConstraintPackage(p) {
+				// This package has no Go files matching the current build constraints (e.g. a
+				// vendored package whose only source file is gated behind an ancient/dead Go
+				// version tag like "!go1.7"). go/packages' loader already self-heals this by
+				// falling back to export-data loading; whether that fallback yields non-nil
+				// types can vary across Bazel build environments, but since the package has no
+				// compiled sources, there is no code that could depend on missing symbols here.
+				// Treat it as empty rather than fatal.
+				d.Logger.Infow("dumpPackageDiagnostic", "PkgName", p.Name, "PkgPath", p.PkgPath, "sourcelessBuildConstraintPackage", true)
+				packageWoErrors++
+				continue
+			}
+
 			packagesWithErrors++
 			// nil implies some error in the package. How many errors?
 
@@ -1648,6 +1666,46 @@ func (d *Driver) findTargets(serviceName string) ([]string, error) {
 		resolver = NewPinocchioTargetResolver(d.WorkspaceRoot, d.Logger)
 	}
 	return resolver.FindTargets(serviceName)
+}
+
+func repairIllTypedPropagationFromSourcelessPkgs(pkgs []*packages.Package) {
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if isSourcelessBuildConstraintPackage(p) {
+			p.IllTyped = false
+			return
+		}
+		if p.Types == nil {
+			return
+		}
+		illTyped := len(p.Errors) > 0
+		if !illTyped {
+			for _, imp := range p.Imports {
+				if imp.IllTyped {
+					illTyped = true
+					break
+				}
+			}
+		}
+		p.IllTyped = illTyped
+	})
+}
+
+// isSourcelessBuildConstraintPackage reports whether p failed to type-check solely because it has
+// no Go files matching the current build constraints (e.g. a vendored package whose only source
+// file is gated behind a dead/ancient Go version tag such as "!go1.7"). go/packages' loader emits
+// a "sources missing for package" diagnostic for these and falls back to loading from export data;
+// that fallback can fail in some Bazel build environments even though the package genuinely has no
+// compiled sources to analyze.
+func isSourcelessBuildConstraintPackage(p *packages.Package) bool {
+	if len(p.CompiledGoFiles) != 0 || len(p.Errors) == 0 {
+		return false
+	}
+	for _, e := range p.Errors {
+		if !strings.HasPrefix(e.Msg, "sources missing for package ") {
+			return false
+		}
+	}
+	return true
 }
 
 // findPackageFromTarget finds the entry-point package given its resolved import path.
