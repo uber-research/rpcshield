@@ -122,6 +122,10 @@ type Options struct {
 	// PermutationThreshold is the number of times the same function-set hash must
 	// be observed reaching a sink before permutation detection triggers. Default is 100. Set to 0 to disable.
 	PermutationThreshold int64
+	// ForceLoaderMode, when non-empty, overrides the BazelLoaderServices allowlist for this run:
+	// "bazel" forces the BazelLoader path, "gopath" forces GoPathWrapper.LiftGoPath. Empty keeps
+	// the per-service allowlist behavior.
+	ForceLoaderMode string
 	// TierOverrides is a map of service name to tier number for overriding Grail-sourced tiers.
 	TierOverrides map[string]int
 	// ExtraExcludePackagePatterns is passed straight through to
@@ -386,6 +390,7 @@ func Run(options Options) (rpcshield.Result, error) {
 		RTABenchNumWorkers:      options.RTABenchNumWorkers,
 		CheckIsomorphism:        options.CheckIsomorphism,
 		PermutationThreshold:    options.PermutationThreshold,
+		ForceLoaderMode:         options.ForceLoaderMode,
 		KeepIBPkgs:              keepIBPkgs,
 		KeepGoPathAfterRun:      options.KeepGoPathAfterRun,
 		BazelLoader:             options.BazelLoader,

@@ -288,10 +288,14 @@ func TestDriver_RunOnPackages(t *testing.T) {
 func TestUseBazelLoader(t *testing.T) {
 	t.Parallel()
 	bazelLoaderServices := []string{"service-0002", "service-0012"}
-	r1 := useBazelLoader("aaa", bazelLoaderServices)
+	r1 := useBazelLoader("aaa", bazelLoaderServices, "")
 	require.False(t, r1)
-	r2 := useBazelLoader("service-0002", bazelLoaderServices)
+	r2 := useBazelLoader("service-0002", bazelLoaderServices, "")
 	require.True(t, r2)
+	r3 := useBazelLoader("aaa", bazelLoaderServices, "bazel")
+	require.True(t, r3)
+	r4 := useBazelLoader("service-0002", bazelLoaderServices, "gopath")
+	require.False(t, r4)
 }
 
 func TestDiagnostics(t *testing.T) {

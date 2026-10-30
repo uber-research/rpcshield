@@ -162,6 +162,10 @@ type DriverOptions struct {
 	// consulting TargetResolver -- lets a caller bypass service-name-to-target resolution
 	// entirely while still going through the normal GoPathWrapper/BazelLoader package-loading path.
 	Targets []string
+	// ForceLoaderMode, when non-empty, overrides Config.BazelLoaderServices' per-service allowlist
+	// for this run: "bazel" forces every target through the BazelLoader path, "gopath" forces every
+	// target through GoPathWrapper.LiftGoPath. Empty (the default) preserves the allowlist behavior.
+	ForceLoaderMode string
 	// PackageSource, when set, is called once per target instead of the default
 	// BazelLoader-or-GoPathWrapper+loader.LoadAll pipeline, to obtain packages/SSA for that target.
 	// This is the seam for callers who already have prepared source (a pre-lifted GOPATH directory,
@@ -453,7 +457,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			}
 			d.Logger.Infow("Loaded packages via PackageSource", "num_packages", len(pkgs))
 			result.RunMetrics[_pkgCount] += float64(len(pkgs))
-		} else if d.opts.BazelLoader != nil && useBazelLoader(serviceName, d.opts.Config.BazelLoaderServices) {
+		} else if d.opts.BazelLoader != nil && useBazelLoader(serviceName, d.opts.Config.BazelLoaderServices, d.opts.ForceLoaderMode) {
 			d.Logger.Infow("Using bazel loader")
 			targetPkgPath := strings.Split(strings.TrimPrefix(target, "//src/"), ":")[0]
 			d.Logger.Infow("Loading packages", "target_pkg_path", targetPkgPath)
@@ -1854,6 +1858,12 @@ func canonicalizeLabel(label string) string {
 	return label
 }
 
-func useBazelLoader(serviceName string, bazelLoaderServices []string) bool {
+func useBazelLoader(serviceName string, bazelLoaderServices []string, forceMode string) bool {
+	switch forceMode {
+	case "bazel":
+		return true
+	case "gopath":
+		return false
+	}
 	return slices.Contains(bazelLoaderServices, serviceName)
 }
