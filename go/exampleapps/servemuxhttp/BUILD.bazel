@@ -1,0 +1,24 @@
+# keep
+load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_path")
+
+go_library(
+    name = "go_default_library",
+    srcs = ["app.go"],
+    importpath = "github.com/uber-research/rpcshield/go/exampleapps/servemuxhttp",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "servemuxhttp",
+    embed = [":go_default_library"],
+    visibility = ["//visibility:public"],
+)
+
+# rpcshield (github.com/uber-research/rpcshield/go) uses this example as test input.
+go_path(
+    name = "servemuxhttp-anal",
+    testonly = True,
+    include_data = False,
+    visibility = ["//finder/http:__subpackages__"],
+    deps = [":servemuxhttp"],
+)

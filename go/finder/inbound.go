@@ -234,6 +234,11 @@ func (f *Finder) Inbound(entryPkg *packages.Package, allPkgs []*packages.Package
 					f.currentService,
 					codebase,
 				),
+				httpfinder.NewServeMuxProvider(
+					f.logger,
+					f.currentService,
+					codebase,
+				),
 				httpfinder.NewGinProvider(
 					f.logger,
 					f.currentService,
@@ -245,6 +250,7 @@ func (f *Finder) Inbound(entryPkg *packages.Package, allPkgs []*packages.Package
 		if err != nil {
 			return nil, fmt.Errorf("finding HTTP handlers: %w", err)
 		}
+
 		result = append(result, httpHandlers...)
 		f.logger.Infow("Found HTTP handlers", "num_handlers", len(httpHandlers))
 	}

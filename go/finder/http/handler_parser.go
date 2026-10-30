@@ -8,6 +8,7 @@ import (
 	"github.com/uber-research/rpcshield/go/common/xslice"
 	fty "github.com/uber-research/rpcshield/go/finder/types"
 	"go.uber.org/zap"
+	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/types/typeutil"
 )
@@ -15,9 +16,16 @@ import (
 // HandlerParser provides functionality to parse HTTP handler functions from SSA values.
 // It handles synthetic functions, wrapped handlers, and interface method resolution.
 type HandlerParser struct {
-	logger    *zap.SugaredLogger
-	codebase  *fty.Codebase
-	unwrapper *syntheticfunc.Unwrapper
+	logger   *zap.SugaredLogger
+	codebase *fty.Codebase
+	// codebasePkgs indexes the service-codebase packages (codebase.CodebaseOnly) by
+	// import path. Direct-function handler resolution is restricted to these so that
+	// handlers registered inside shared infra dependencies (e.g. pprof/zap/jaeger
+	// debug endpoints hung off a net/http.ServeMux) are never surfaced as inbounds of
+	// the analyzed service. This mirrors findImplementationsOfInterface, which already
+	// only searches codebase.CodebaseOnly.
+	codebasePkgs map[string]*packages.Package
+	unwrapper    *syntheticfunc.Unwrapper
 	// isHandlerSig reports whether a function signature is a valid handler for the
 	// framework this parser serves. It lets a single parser be reused across
 	// frameworks whose handlers have different signatures (e.g. net/http's
@@ -35,9 +43,14 @@ func NewHandlerParser(logger *zap.SugaredLogger, codebase *fty.Codebase) *Handle
 // signature satisfies isHandlerSig. Framework providers (gin, ...) supply their own
 // matcher so the shared unwrapping/interface-resolution machinery can be reused.
 func NewHandlerParserWithMatcher(logger *zap.SugaredLogger, codebase *fty.Codebase, isHandlerSig func(*types.Signature) bool) *HandlerParser {
+	codebasePkgs := make(map[string]*packages.Package, len(codebase.CodebaseOnly))
+	for _, pkg := range codebase.CodebaseOnly {
+		codebasePkgs[pkg.PkgPath] = pkg
+	}
 	return &HandlerParser{
 		logger:       logger,
 		codebase:     codebase,
+		codebasePkgs: codebasePkgs,
 		unwrapper:    syntheticfunc.NewUnwrapper(logger),
 		isHandlerSig: isHandlerSig,
 	}
@@ -190,13 +203,17 @@ func (p *HandlerParser) handlerFuncsFrom(f *ssa.Function) ([]handler, error) {
 		if obj == nil {
 			return nil, fmt.Errorf("True source function %v returned a nil *types.Func object", f)
 		}
-		if pkg, ok := p.codebase.PkgMap[x.Pkg.Pkg.Path()]; ok {
+		// Only resolve handlers that live in the service codebase. Handlers whose
+		// package is outside it (e.g. debug endpoints registered on a
+		// net/http.ServeMux inside shared infra dependencies) are intentionally
+		// skipped so they are not reported as inbounds of the analyzed service.
+		if pkg, ok := p.codebasePkgs[x.Pkg.Pkg.Path()]; ok {
 			objs = append(objs, handler{
 				pkg: pkg,
 				obj: obj,
 			})
 		} else {
-			return nil, fmt.Errorf("Could not find package for HTTP handler %v", f)
+			p.logger.Debugf("Skipping HTTP handler %v: package %q is outside the service codebase", f, x.Pkg.Pkg.Path())
 		}
 	case *ssa.Call:
 		typ := x.Call.Value.Type()
