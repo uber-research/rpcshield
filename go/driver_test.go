@@ -1194,3 +1194,118 @@ func TestEnrichReportMetrics(t *testing.T) {
 	assert.Equal(t, 0, r2.Total.FailOpen)
 	assert.Equal(t, 0, r2.Total.FailUnknown)
 }
+
+// newTestReport builds a synthetic report with a single call path of the given
+// status, made up of edgeCount edges all attributed to the given analyzer kind.
+func newTestReport(service string, status constant.Failness, isAsync bool, edgeCount int, kind constant.AnalyzerKind) output.Report {
+	edges := make([]*output.EdgeWrapper, edgeCount)
+	for i := range edges {
+		edges[i] = &output.EdgeWrapper{
+			Caller: fmt.Sprintf("caller%d", i),
+			Callee: fmt.Sprintf("callee%d", i),
+			AnalyzerOutput: output.AnalyzerOutput{
+				Status:         status,
+				Source:         kind,
+				OriginalSource: kind,
+			},
+		}
+	}
+	return output.Report{
+		Inbound:     output.EndPoint{Service: grail.Service{Name: service}},
+		PathResults: []output.PathResult{{Edges: edges, Status: status, IsAsync: isAsync}},
+		Status:      status,
+	}
+}
+
+// TestDriver_AggregateReportMetrics pins down the aggregation invariant: each
+// report contributes to the metrics exactly once, no matter how many targets
+// the reports were collected from.
+//
+// Regression test for the aggregation block having lived inside the per-target
+// loop while the `reports` slice accumulated across targets, which folded every
+// earlier target's reports back in on each iteration and inflated the metrics
+// (and the per-edge AnalyzerMetrics rows) quadratically in the target count.
+func TestDriver_AggregateReportMetrics(t *testing.T) {
+	t.Parallel()
+
+	// Reports as they would be produced by two separate bazel targets of the
+	// same service. The driver appends both sets into one slice and aggregates
+	// the result once.
+	targetAReports := []output.Report{
+		newTestReport("svc", constant.FailOpen, false /* isAsync */, 2, constant.SSA),
+		newTestReport("svc", constant.FailClose, true /* isAsync */, 3, constant.AST),
+	}
+	targetBReports := []output.Report{
+		newTestReport("svc", constant.FailOpen, true /* isAsync */, 4, constant.SSA),
+	}
+
+	tests := []struct {
+		name    string
+		reports []output.Report
+
+		wantAnalyzerMetricRows int
+		wantAnalyzerCounts     map[string]int
+		wantFailnessCounts     map[string]int
+		wantCallPathLengths    CallPathLengths
+	}{
+		{
+			name:                   "single target",
+			reports:                targetAReports,
+			wantAnalyzerMetricRows: 5, // 2 + 3 edges
+			wantAnalyzerCounts:     map[string]int{"analyzer_ssa_count": 2, "analyzer_ast_count": 3},
+			wantFailnessCounts:     map[string]int{"failopen_path_count": 1, "failclose_path_count": 1},
+			wantCallPathLengths: CallPathLengths{
+				FailOpenSync:   []CallPathLength{{Length: 2, FailOpenDistanceFromOutbound: 1}},
+				FailCloseAsync: []CallPathLength{{Length: 3}},
+			},
+		},
+		{
+			name:                   "two targets aggregated once",
+			reports:                append(append([]output.Report{}, targetAReports...), targetBReports...),
+			wantAnalyzerMetricRows: 9, // 2 + 3 + 4 edges, counted once each
+			wantAnalyzerCounts:     map[string]int{"analyzer_ssa_count": 6, "analyzer_ast_count": 3},
+			wantFailnessCounts:     map[string]int{"failopen_path_count": 2, "failclose_path_count": 1},
+			wantCallPathLengths: CallPathLengths{
+				FailOpenSync:   []CallPathLength{{Length: 2, FailOpenDistanceFromOutbound: 1}},
+				FailOpenAsync:  []CallPathLength{{Length: 4, FailOpenDistanceFromOutbound: 1}},
+				FailCloseAsync: []CallPathLength{{Length: 3}},
+			},
+		},
+		{
+			name:                   "no reports",
+			reports:                nil,
+			wantAnalyzerMetricRows: 0,
+			wantAnalyzerCounts:     map[string]int{},
+			wantFailnessCounts:     map[string]int{},
+			wantCallPathLengths:    CallPathLengths{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := NewDriver("" /* workspaceRoot */, nil /* runner */, nil /* gp */, nil /* mapper */, nil /* aiClient */, nil /* allServices */, nil /* prodServiceTrafficRecords */, nil /* logger */, _defaultDriverOptions)
+			result := &Result{
+				RunMetrics:      make(map[string]float64),
+				FailnessMetrics: make(map[string]float64),
+				CallPathLengths: &CallPathLengths{},
+			}
+
+			d.aggregateReportMetrics(result, tt.reports)
+
+			// One LDA row per edge, never more.
+			assert.Len(t, result.AnalyzerMetrics, tt.wantAnalyzerMetricRows)
+			for name, want := range tt.wantAnalyzerCounts {
+				assert.Equal(t, want, int(result.RunMetrics[name]), "run metric %q", name)
+			}
+			for name, want := range tt.wantFailnessCounts {
+				assert.Equal(t, want, int(result.FailnessMetrics[name]), "failness metric %q", name)
+			}
+			assert.Equal(t, tt.wantCallPathLengths.FailOpenSync, result.CallPathLengths.FailOpenSync)
+			assert.Equal(t, tt.wantCallPathLengths.FailOpenAsync, result.CallPathLengths.FailOpenAsync)
+			assert.Equal(t, tt.wantCallPathLengths.FailCloseSync, result.CallPathLengths.FailCloseSync)
+			assert.Equal(t, tt.wantCallPathLengths.FailCloseAsync, result.CallPathLengths.FailCloseAsync)
+		})
+	}
+}
