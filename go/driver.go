@@ -136,6 +136,10 @@ type DriverOptions struct {
 	// PermutationThreshold is the number of times the same function-set hash must
 	// be observed reaching a sink before permutation detection triggers. Default is 100. Set to 0 to disable.
 	PermutationThreshold int64
+	// CanonicalEdgeOrder sorts every call-graph node's outgoing edges into a deterministic
+	// order before path exploration, so convergence pruning does not depend on package load
+	// order. Opt-in; see graph.Config.CanonicalEdgeOrder.
+	CanonicalEdgeOrder bool
 	// Config carries Uber-specific settings (Sourcegraph/Terrablob URL templates, code path
 	// prefix, CSV repo name, service allowlists) that packages in this repo depend on. Zero
 	// value disables the corresponding link/heuristic.
@@ -677,6 +681,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			RTAFlavor:               rtaFlavor,
 			RTANumWorkers:           rtaNumWorkers,
 			PermutationThreshold:    d.opts.PermutationThreshold,
+			CanonicalEdgeOrder:      d.opts.CanonicalEdgeOrder,
 			CodebasePkgPrefix:       d.opts.Config.CodebasePkgPrefix,
 			SafeGoPkgPath:           d.opts.Config.SafeGoPkgPath,
 		}

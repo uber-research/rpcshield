@@ -128,6 +128,8 @@ type Options struct {
 	ForceLoaderMode string
 	// TierOverrides is a map of service name to tier number for overriding Grail-sourced tiers.
 	TierOverrides map[string]int
+	// CanonicalEdgeOrder sorts call-graph outgoing edges deterministically before path exploration.
+	CanonicalEdgeOrder bool
 	// ExtraExcludePackagePatterns is passed straight through to
 	// config.Config.ExtraExcludePackagePatterns -- additional graph call-graph package-exclusion
 	// regex patterns on top of graph.DefaultExcludePackagePatterns. Empty (the OSS default) adds
@@ -385,6 +387,7 @@ func Run(options Options) (rpcshield.Result, error) {
 		RTAFlavor:               options.RTAFlavor,
 		RTANumWorkers:           options.RTANumWorkers,
 		DisableParallelCallTree: options.DisableParallelCallTree,
+		CanonicalEdgeOrder:      options.CanonicalEdgeOrder,
 		CGConstructionOnly:      options.CGConstructionOnly,
 		RTABenchFlavors:         options.RTABenchFlavors,
 		RTABenchNumWorkers:      options.RTABenchNumWorkers,
