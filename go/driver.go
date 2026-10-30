@@ -1071,6 +1071,9 @@ func (d *Driver) groupReportsByInboundOutbound(reports []output.Report) []output
 	var groupedReports []output.Report
 	for _, v := range groupedReportsMap {
 		v.TotalPaths = len(v.PathResults)
+		// Sort paths deterministically at assembly time so downstream truncation
+		// and reporting produce stable output across otherwise-identical runs.
+		v.SortPathResults()
 		groupedReports = append(groupedReports, v)
 	}
 

@@ -316,3 +316,71 @@ func TestFlamegraph(t *testing.T) {
 	_, err := report.FlamegraphSVG(runner, "")
 	require.NoError(t, err)
 }
+
+func TestSortPathResults_Deterministic(t *testing.T) {
+	t.Parallel()
+
+	pathA := PathResult{
+		Status: constant.FailClose,
+		Edges: []*EdgeWrapper{
+			{Caller: "svcA.handler", Callee: "svcB.get", Filepath: "a.go", CalleeLineNo: 10},
+		},
+	}
+	pathB := PathResult{
+		Status: constant.FailClose,
+		Edges: []*EdgeWrapper{
+			{Caller: "svcA.handler", Callee: "svcC.list", Filepath: "b.go", CalleeLineNo: 20},
+		},
+	}
+	pathC := PathResult{
+		Status: constant.FailOpen,
+		Edges: []*EdgeWrapper{
+			{Caller: "svcA.worker", Callee: "svcD.write", Filepath: "c.go", CalleeLineNo: 5},
+		},
+	}
+	// Same edges as pathA but async: must sort to a distinct, stable position.
+	pathAAsync := PathResult{
+		Status:  constant.FailClose,
+		IsAsync: true,
+		Edges: []*EdgeWrapper{
+			{Caller: "svcA.handler", Callee: "svcB.get", Filepath: "a.go", CalleeLineNo: 10},
+		},
+	}
+
+	// Feed several different input permutations of the same set; every one must
+	// produce the identical, canonical ordering.
+	permutations := [][]PathResult{
+		{pathA, pathB, pathC, pathAAsync},
+		{pathAAsync, pathC, pathB, pathA},
+		{pathC, pathA, pathAAsync, pathB},
+		{pathB, pathAAsync, pathA, pathC},
+	}
+
+	var want []PathResult
+	for i, perm := range permutations {
+		r := Report{PathResults: make([]PathResult, len(perm))}
+		copy(r.PathResults, perm)
+		r.SortPathResults()
+		got := r.PathResults
+
+		if i == 0 {
+			want = got
+			continue
+		}
+		require.Equal(t, want, got, "permutation %d produced a different order", i)
+	}
+
+	// Sorting is idempotent.
+	again := Report{PathResults: make([]PathResult, len(want))}
+	copy(again.PathResults, want)
+	again.SortPathResults()
+	require.Equal(t, want, again.PathResults)
+}
+
+func TestSortPathResults_Empty(t *testing.T) {
+	t.Parallel()
+
+	// Must not panic on nil or empty path results.
+	(&Report{}).SortPathResults()
+	(&Report{PathResults: []PathResult{}}).SortPathResults()
+}
