@@ -96,6 +96,12 @@ func TestEnv(t *testing.T) {
 		if containsPrefix(envVars, "CGO_CFLAGS=") {
 			t.Errorf("did not expect CGO_CFLAGS to be set for empty cdeps, got %+v", envVars)
 		}
+		if containsPrefix(envVars, "CGO_CXXFLAGS=") {
+			t.Errorf("did not expect CGO_CXXFLAGS to be set for empty cdeps, got %+v", envVars)
+		}
+		if containsPrefix(envVars, "CGO_CPPFLAGS=") {
+			t.Errorf("did not expect CGO_CPPFLAGS to be set for empty cdeps, got %+v", envVars)
+		}
 	})
 
 	t.Run("WithCdeps", func(t *testing.T) {
@@ -113,10 +119,49 @@ func TestEnv(t *testing.T) {
 			t.Errorf("expected CGO_ENABLED=1 in environment for non-empty cdeps, got %+v", envVars)
 		}
 
-		// Construct the expected CGO_CFLAGS value
-		expectedCflags := "CGO_CFLAGS=" + strings.Join(cdeps, " ")
-		if !contains(envVars, expectedCflags) {
-			t.Errorf("expected %s in environment, got %+v", expectedCflags, envVars)
+		// The include paths must be mirrored into the C, C++, and preprocessor flags so
+		// that cgo can resolve headers regardless of the embedded source language (.c
+		// uses CGO_CFLAGS, .cc uses CGO_CXXFLAGS, both preprocess with CGO_CPPFLAGS).
+		joined := strings.Join(cdeps, " ")
+		for _, key := range []string{"CGO_CFLAGS", "CGO_CXXFLAGS", "CGO_CPPFLAGS"} {
+			expected := key + "=" + joined
+			if !contains(envVars, expected) {
+				t.Errorf("expected %s in environment, got %+v", expected, envVars)
+			}
+		}
+	})
+
+	// A C++ language-standard flag must reach only the C++ compiler. If it leaked
+	// into CGO_CFLAGS or the shared CGO_CPPFLAGS, gcc would reject every .c cgo
+	// source ("-std=c++NN is valid for C++ but not for C").
+	t.Run("CXXStdFlagRoutedToCXXOnly", func(t *testing.T) {
+		cdeps := []string{"-I/inc", "-std=c++17"}
+		envVars := env("/gp", cdeps)
+
+		if v, _ := envValue(envVars, "CGO_CXXFLAGS"); v != "-I/inc -std=c++17" {
+			t.Errorf("CGO_CXXFLAGS = %q, want %q", v, "-I/inc -std=c++17")
+		}
+		if v, _ := envValue(envVars, "CGO_CFLAGS"); v != "-I/inc" {
+			t.Errorf("CGO_CFLAGS = %q, want %q (C++ std must not leak to C)", v, "-I/inc")
+		}
+		if v, _ := envValue(envVars, "CGO_CPPFLAGS"); v != "-I/inc" {
+			t.Errorf("CGO_CPPFLAGS = %q, want %q (C++ std must not leak to shared preprocessor)", v, "-I/inc")
+		}
+	})
+
+	// A C language-standard flag must reach only the C compiler.
+	t.Run("CStdFlagRoutedToCOnly", func(t *testing.T) {
+		cdeps := []string{"-I/inc", "-std=c11"}
+		envVars := env("/gp", cdeps)
+
+		if v, _ := envValue(envVars, "CGO_CFLAGS"); v != "-I/inc -std=c11" {
+			t.Errorf("CGO_CFLAGS = %q, want %q", v, "-I/inc -std=c11")
+		}
+		if v, _ := envValue(envVars, "CGO_CXXFLAGS"); v != "-I/inc" {
+			t.Errorf("CGO_CXXFLAGS = %q, want %q (C std must not leak to C++)", v, "-I/inc")
+		}
+		if v, _ := envValue(envVars, "CGO_CPPFLAGS"); v != "-I/inc" {
+			t.Errorf("CGO_CPPFLAGS = %q, want %q", v, "-I/inc")
 		}
 	})
 }
@@ -150,4 +195,14 @@ func containsPrefix(slice []string, prefix string) bool {
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+// envValue returns the value of the first "KEY=value" entry matching key.
+func envValue(slice []string, key string) (string, bool) {
+	for _, s := range slice {
+		if strings.HasPrefix(s, key+"=") {
+			return strings.TrimPrefix(s, key+"="), true
+		}
+	}
+	return "", false
 }

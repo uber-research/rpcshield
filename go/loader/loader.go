@@ -135,10 +135,39 @@ func env(goPath string, cdeps []string) []string {
 			// this repo only exists to make `rev-parse --show-toplevel` succeed.
 			"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "HOME="+workTree)
 	}
-	if len(cdeps) > 0 {
-		// This enables our lifted directory to correctly read the C/C++ libraries.
-		e = append(e, "CGO_ENABLED=1", "CGO_CFLAGS="+strings.Join(cdeps, " "))
+	if len(cdeps) == 0 {
+		return e
 	}
+
+	// This enables our lifted directory to correctly read the C/C++ libraries.
+	//
+	// cdeps are the flags harvested from Bazel (include paths and C/C++ language
+	// standard flags). cgo routes flags by source language: C sources (.c) are
+	// compiled with CGO_CPPFLAGS+CGO_CFLAGS, and C++ sources (.cc/.cpp) with
+	// CGO_CPPFLAGS+CGO_CXXFLAGS. Include paths are language-agnostic, so they go
+	// to all three. A language standard flag must reach only its own compiler:
+	// a C++ standard (-std=c++NN) placed in CGO_CFLAGS or the shared CGO_CPPFLAGS
+	// would make the C compiler reject every .c cgo source ("-std=c++NN is valid
+	// for C++ but not for C"), and vice versa. So route -std flags by language.
+	var common, cOnly, cxxOnly []string
+	for _, f := range cdeps {
+		switch {
+		case isCXXStdFlag(f):
+			cxxOnly = append(cxxOnly, f)
+		case isCStdFlag(f):
+			cOnly = append(cOnly, f)
+		default:
+			common = append(common, f)
+		}
+	}
+
+	join := func(a, b []string) string { return strings.Join(append(append([]string{}, a...), b...), " ") }
+	e = append(e,
+		"CGO_ENABLED=1",
+		"CGO_CFLAGS="+join(common, cOnly),
+		"CGO_CXXFLAGS="+join(common, cxxOnly),
+		"CGO_CPPFLAGS="+strings.Join(common, " "),
+	)
 	return e
 }
 
@@ -245,4 +274,17 @@ func LoadSSAWithGoPath(rootDirName string, path []string, loadPath string) (*ssa
 	ssaProg.Build()
 
 	return ssaProg, entryPkg, allPkgs, nil
+}
+
+// isCXXStdFlag reports whether the flag selects a C++ language standard
+// (e.g. "-std=c++17", "-std=gnu++20"). Such flags must reach only the C++
+// compiler.
+func isCXXStdFlag(flag string) bool {
+	return strings.HasPrefix(flag, "-std=") && strings.Contains(flag, "++")
+}
+
+// isCStdFlag reports whether the flag selects a C language standard
+// (e.g. "-std=c11", "-std=gnu99"). Such flags must reach only the C compiler.
+func isCStdFlag(flag string) bool {
+	return strings.HasPrefix(flag, "-std=") && !strings.Contains(flag, "++")
 }
