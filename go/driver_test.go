@@ -33,6 +33,7 @@ import (
 	"github.com/uber-research/rpcshield/go/grail"
 	"github.com/uber-research/rpcshield/go/graph"
 	"github.com/uber-research/rpcshield/go/output"
+	"github.com/uber-research/rpcshield/go/query"
 	"github.com/uber-research/rpcshield/go/rpcshieldtest"
 	"github.com/uber-research/rpcshield/go/rta/rtatest"
 	"github.com/uber-research/rpcshield/go/staticanalyzer/asthelper"
@@ -43,7 +44,7 @@ import (
 )
 
 var _defaultDriverOptions = DriverOptions{
-	NoOBClipByTier: false,
+	SkipOBTierFilter: false,
 	Analyzers: map[constant.AnalyzerKind]bool{
 		constant.CacheAnalyzerKind: true,
 		constant.Predefined:        true,
@@ -1020,23 +1021,88 @@ func TestDriver_HTTP_OB_Resolving(t *testing.T) {
 	tests := []struct {
 		name              string
 		callerTier        int
-		noOBClipByTier    bool
+		skipOBTierFilter  bool
 		wantResolvedPaths int
 	}{
 		{name: "lower-tier caller retained with clipping", callerTier: 2, wantResolvedPaths: 3},
 		{name: "same-tier caller filtered with clipping", callerTier: 5, wantResolvedPaths: 0},
 		{name: "higher-tier caller filtered with clipping", callerTier: 6, wantResolvedPaths: 0},
-		{name: "same-tier caller retained without clipping", callerTier: 5, noOBClipByTier: true, wantResolvedPaths: 3},
-		{name: "higher-tier caller retained without clipping", callerTier: 6, noOBClipByTier: true, wantResolvedPaths: 3},
+		{name: "same-tier caller retained without clipping", callerTier: 5, skipOBTierFilter: true, wantResolvedPaths: 3},
+		{name: "higher-tier caller retained without clipping", callerTier: 6, skipOBTierFilter: true, wantResolvedPaths: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			driver.opts.NoOBClipByTier = tt.noOBClipByTier
+			driver.opts.SkipOBTierFilter = tt.skipOBTierFilter
 			resolvedPaths, _, _, _ := driver.resolveHTTPOutboundService(paths, grail.Service{Name: "rpcshielddemo", Tier: tt.callerTier})
 			require.Len(t, resolvedPaths, tt.wantResolvedPaths)
 			for _, path := range resolvedPaths {
 				require.Equal(t, "httpservicefoo", path.Outbound.Service.Name)
 			}
+		})
+	}
+}
+
+func TestDriver_ShouldSkipForMissingProdTraffic(t *testing.T) {
+	t.Parallel()
+
+	service := grail.Service{Name: "test-service"}
+	missingInboundTraffic := []query.ProdServiceTrafficRecord{
+		{
+			ServiceName:      service.Name,
+			AppearedAsCaller: true,
+			AppearedAsCallee: false,
+		},
+	}
+	missingOutboundTraffic := []query.ProdServiceTrafficRecord{
+		{
+			ServiceName:      service.Name,
+			AppearedAsCaller: false,
+			AppearedAsCallee: true,
+		},
+	}
+
+	tests := []struct {
+		name                      string
+		records                   []query.ProdServiceTrafficRecord
+		skipProdTrafficFilter     bool
+		callGraphConstructionOnly bool
+		want                      bool
+	}{
+		{
+			name: "traffic present",
+		},
+		{
+			name:    "missing inbound traffic",
+			records: missingInboundTraffic,
+			want:    true,
+		},
+		{
+			name:    "missing outbound traffic",
+			records: missingOutboundTraffic,
+			want:    true,
+		},
+		{
+			name:                  "gate disabled",
+			records:               missingInboundTraffic,
+			skipProdTrafficFilter: true,
+		},
+		{
+			name:                      "call graph construction only",
+			records:                   missingOutboundTraffic,
+			callGraphConstructionOnly: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driver := &Driver{
+				ProdServiceTrafficRecords: tt.records,
+				Logger:                    zap.NewNop().Sugar(),
+				opts: DriverOptions{
+					SkipProdTrafficFilter: tt.skipProdTrafficFilter,
+					CGConstructionOnly:    tt.callGraphConstructionOnly,
+				},
+			}
+			require.Equal(t, tt.want, driver.shouldSkipForMissingProdTraffic(service))
 		})
 	}
 }

@@ -77,8 +77,10 @@ type Options struct {
 	MutexProfile string
 	// BlockProfile is the path to write block profile to (only if non-empty).
 	BlockProfile string
-	// NoOBClipByTier is the flag to disable OB clipping by the callee tiers.
-	NoOBClipByTier bool
+	// SkipOBTierFilter is the flag to disable OB clipping by the callee tiers.
+	SkipOBTierFilter bool
+	// SkipProdTrafficFilter disables skipping services without observed inbound or outbound production traffic.
+	SkipProdTrafficFilter bool
 	// Analyzers is the list of analyzers (SSA, AST, LLM) to run for fail-ness detection.
 	Analyzers map[constant.AnalyzerKind]bool
 	// GitSHA is the git SHA of the commit to be analyzed.
@@ -374,7 +376,8 @@ func Run(options Options) (rpcshield.Result, error) {
 		}
 	}
 	driverOpts := rpcshield.DriverOptions{
-		NoOBClipByTier:          options.NoOBClipByTier,
+		SkipOBTierFilter:        options.SkipOBTierFilter,
+		SkipProdTrafficFilter:   options.SkipProdTrafficFilter,
 		Report:                  options.Report,
 		Analyzers:               options.Analyzers,
 		GitSHA:                  options.GitSHA,
