@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -306,7 +307,7 @@ func (br *gopathWrapper) cqueryMine(runner utils.Runner, resp CqueryResponse) ([
 				for _, c := range attr.StringListValue {
 					br.Logger.Debugw("explore go lib -> c lib deps", "clib", c)
 					clibs = append(clibs, c)
-					clibSrcGoFiles[c] = append(make([]string, 0))
+					clibSrcGoFiles[c] = []string{}
 				}
 			}
 		}
@@ -342,6 +343,17 @@ func (br *gopathWrapper) processCCLibrary(runner utils.Runner, rule Rule, libLoc
 						*iFlagsSlice = append(*iFlagsSlice, normalizedFlag)
 						iFlagDedup[normalizedFlag] = true
 					}
+				} else if isStdCopt(c) {
+					// Preserve the C/C++ language-standard flag (e.g. `-std=c++17`).
+					// Unlike include paths, nothing else reproduces it for the
+					// non-Bazel cgo build, so it must be forwarded to cgo or C++
+					// sources fail to compile on toolchains whose default standard
+					// predates the one the library requires. The loader routes it
+					// to the correct compiler based on language.
+					if _, ok := iFlagDedup[c]; !ok {
+						*iFlagsSlice = append(*iFlagsSlice, c)
+						iFlagDedup[c] = true
+					}
 				}
 			}
 		}
@@ -359,7 +371,7 @@ func (br *gopathWrapper) processCCLibrary(runner utils.Runner, rule Rule, libLoc
 			// Copy the raw cc_library source/header files explicitly to the lifted path location.
 			// This is required because `bazel build --remote_download_all` does not download the raw cc_library files.
 			if isRawSrcsOrHdrs(attr) {
-				depPath, err := br.copySrcHdrFiles(runner, libLocationPath, gopathRoot, includePrefix)
+				depPath, err := br.copySrcHdrFiles(runner, libLocationPath, gopathRoot, includePrefix, attr.StringListValue)
 				if err != nil {
 					return fmt.Errorf("copySrcHdrFiles fail: %w", err)
 				}
@@ -574,36 +586,63 @@ func getNormalizedIFlag(depRoot, flag string) (string, bool) {
 	return flag, false
 }
 
-// copySrcHdrFiles copies the raw cc_library rule to the lifted path location. It returns the path of the copied files and an error, if any.
-func (br *gopathWrapper) copySrcHdrFiles(runner utils.Runner, libLocationPath, gopathRoot, includePrefix string) (string, error) {
-	var finalDestPath string
+// isStdCopt reports whether the copt selects the C/C++ language standard
+// (e.g. "-std=c++17" or "-std=c11"). These are forwarded verbatim to cgo
+// because, unlike include paths, there is no other mechanism that reproduces
+// them for the non-Bazel cgo build.
+func isStdCopt(flag string) bool {
+	return strings.HasPrefix(flag, "-std=")
+}
+
+// copySrcHdrFiles copies the cc_library rule's declared source/header files to the lifted path location, preserving any relative subdirectory structure. It returns the path of the copied files and an error, if any.
+//
+// Only the files the rule explicitly declares in srcs/hdrs are copied. Copying
+// the whole directory (cp -r) would also drag in sibling files the rule does
+// not declare — e.g. a testonly cgo package in a `test/` subdirectory — whose
+// .go files then leak into the lift and abort package loading. srcs/hdrs are
+// C/C++ only, so real Go dependencies (materialized separately by go_path) are
+// never touched.
+func (br *gopathWrapper) copySrcHdrFiles(runner utils.Runner, libLocationPath, gopathRoot, includePrefix string, files []string) (string, error) {
 	// handle internal dependency
 	// Consider the example below to understand the input and output paths:
-	// libLocationPath: /home/user/go-code/src/example.internal/engsec/ucrypto/core
-	// gopathRoot: /path/to/bazel/cache/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.internal/identity/customer/breeze/breeze-anal
+	// libLocationPath: /path/to/workspace/src/example.com/crypto/core
+	// gopathRoot: /path/to/bazel/cache/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.com/svc/svc-anal
 
 	// Prepare destination path for copying by trimming the workspace prefix.
-	// Example destPath: /path/to/bazel/cache/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.internal/identity/customer/breeze/breeze-anal/src/example.internal/engsec/ucrypto
+	// Example destPath: /path/to/bazel/cache/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.com/svc/svc-anal/src/example.com/crypto
 	destPath := filepath.Join(gopathRoot, strings.TrimPrefix(filepath.Dir(libLocationPath), br.Workspace))
 	// If the library is not found in the monorepo, skip it.
 	if len(destPath) == 0 {
 		br.Logger.Debugf("raw cc_library rule not found in monorepo: %s", libLocationPath)
 		return "", fmt.Errorf("raw cc_library rule not found in monorepo: %s", libLocationPath)
 	}
-	// By default, the folder is read-only, relax it in order to rename it.
+	// By default, the folder is read-only, relax it in order to write into it.
 	if _, _, err := utils.ExecCommand(runner, "chmod", "-R", "777", gopathRoot); err != nil {
 		return "", fmt.Errorf("failed to make %q writable: %w", gopathRoot, err)
 	}
 
-	// Copy the raw cc_library rule to the lifted path location.
-	if _, _, err := utils.ExecCommand(runner, "mkdir", "-p", destPath); err != nil {
-		return "", fmt.Errorf("failed to create raw cc_library directory %q: %w", destPath, err)
+	// Example finalDestPath: /path/to/bazel/cache/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.com/svc/svc-anal/src/example.com/crypto/core
+	finalDestPath := filepath.Join(destPath, filepath.Base(libLocationPath))
+
+	// Copy each declared source/header file, recreating its parent directory as
+	// needed. srcs/hdrs come back from cquery as labels (e.g. "//pkg/path:foo.h"
+	// or "pkg/path:sub/foo.h"); the file name relative to the rule's own package
+	// is the part after the last ":". os.MkdirAll is idempotent, so it also
+	// creates finalDestPath itself when copying the first top-level file.
+	for _, f := range files {
+		name := f
+		if idx := strings.LastIndex(f, ":"); idx >= 0 {
+			name = f[idx+1:]
+		}
+		srcFile := filepath.Join(libLocationPath, name)
+		dstFile := filepath.Join(finalDestPath, name)
+		if err := os.MkdirAll(filepath.Dir(dstFile), 0o755); err != nil {
+			return "", fmt.Errorf("failed to create raw cc_library directory %q: %w", filepath.Dir(dstFile), err)
+		}
+		if err := copyFile(srcFile, dstFile); err != nil {
+			return "", fmt.Errorf("failed to copy raw cc_library file from %q to %q: %w", srcFile, dstFile, err)
+		}
 	}
-	if _, _, err := utils.ExecCommand(runner, "cp", "-r", libLocationPath, destPath); err != nil {
-		return "", fmt.Errorf("failed to copy raw cc_library rule from %q to %q: %w", libLocationPath, destPath, err)
-	}
-	finalDestPath = filepath.Join(destPath, filepath.Base(libLocationPath))
-	// Example return value: /path/to/bazel/cache/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.internal/identity/customer/breeze/breeze-anal/src/example.internal/engsec/ucrypto/core
 	return finalDestPath, nil
 }
 
@@ -661,4 +700,22 @@ func getImportPathFromBazelFile(filePath string) (string, error) {
 	}
 
 	return matches[1], nil
+}
+
+// copyFile copies a regular file from src to dst, creating or truncating dst.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
