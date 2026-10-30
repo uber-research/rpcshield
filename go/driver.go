@@ -202,6 +202,7 @@ const (
 	_graphBuildingDurationSecs         = "graph_building_duration_secs"
 	_ssaAstMappingDurationSecs         = "ssa_ast_mapping_duration_secs"
 	_analysisDurationSecs              = "analysis_duration_secs"
+	_resultAggregationDurationSecs     = "result_aggregation_duration_secs"
 	_pkgCount                          = "pkg_count"
 	_ssaPkgCount                       = "ssa_pkg_count"
 	_targetCount                       = "target_count"
@@ -773,147 +774,14 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		start = time.Now()
 		d.Logger.Infow("Analyzing call paths", "analyzers", d.opts.Analyzers, "num_paths", len(paths))
 		reports = append(reports, d.analyzeCallPaths(pkgs, paths)...)
-		// Collect the total counts of each analyzer kind for observability purposes.
-		kindStats := make(map[constant.AnalyzerKind]int)
-		// Collect the total counts of each fail-ness status across call paths for observability purposes.
-		failnessPathStats := make(map[constant.Failness]int)
-		// Collect call path lengths for LDA observability.
-		var failCloseSyncPathLengths []CallPathLength
-		var failOpenSyncPathLengths []CallPathLength
-		var failCloseAsyncPathLengths []CallPathLength
-		var failOpenAsyncPathLengths []CallPathLength
-		for _, r := range reports {
-			for _, pr := range r.PathResults {
-				failOpenIntroducedAtLength := 0
-				for k, er := range pr.Edges {
-					// Find the first fail open edge in the path.
-					if failOpenIntroducedAtLength == 0 && er.AnalyzerOutput.Status == constant.FailOpen {
-						failOpenIntroducedAtLength = k + 1
-					}
-
-					src := er.AnalyzerOutput.Source
-					if src != er.AnalyzerOutput.OriginalSource {
-						src = src + "_" + er.AnalyzerOutput.OriginalSource
-					}
-					kindStats[src]++
-
-					// Add the analyzer result to the result for observability purposes.
-					result.AnalyzerMetrics = append(result.AnalyzerMetrics, map[string]string{
-						"run_timestamp":      d.opts.Timestamp,
-						"service":            r.Inbound.Service.Name,
-						"caller":             er.Caller,
-						"callee":             er.Callee,
-						"source_code_link":   er.SourceGraphLink,
-						"edge_result_source": string(src),
-						"edge_result":        string(er.AnalyzerOutput.Status),
-						"error_count":        strconv.Itoa(len(er.Errors)),
-						"error":              strings.Join(er.Errors, "<error_sep>"),
-					})
-				}
-				failnessPathStats[pr.Status]++
-
-				// Track the path length statistics for fail open and fail close paths.
-				if pr.Status == constant.FailOpen {
-					if pr.IsAsync {
-						failOpenAsyncPathLengths = append(failOpenAsyncPathLengths, CallPathLength{Length: len(pr.Edges), FailOpenDistanceFromOutbound: failOpenIntroducedAtLength})
-					} else {
-						failOpenSyncPathLengths = append(failOpenSyncPathLengths, CallPathLength{Length: len(pr.Edges), FailOpenDistanceFromOutbound: failOpenIntroducedAtLength})
-					}
-				} else if pr.Status == constant.FailClose {
-					if pr.IsAsync {
-						failCloseAsyncPathLengths = append(failCloseAsyncPathLengths, CallPathLength{Length: len(pr.Edges)})
-					} else {
-						failCloseSyncPathLengths = append(failCloseSyncPathLengths, CallPathLength{Length: len(pr.Edges)})
-					}
-				}
-			}
-		}
-		d.Logger.Infow("Analyzer result", "kind_stats", kindStats)
-		for k, v := range kindStats {
-			result.RunMetrics[fmt.Sprintf("analyzer_%s_count", strings.ToLower(string(k)))] += float64(v)
-		}
-		d.Logger.Infow("Fail-ness path result", "failness_path_stats", failnessPathStats)
-		for k, v := range failnessPathStats {
-			result.FailnessMetrics[fmt.Sprintf("%s_path_count", strings.ToLower(string(k)))] += float64(v)
-		}
-
-		// Compute call path length percentile statistics for LDA observability.
-		// percentile returns the value at the given percentile (0-100) from a sorted slice using nearest-rank.
-		percentile := func(sorted []int, p int) float64 {
-			n := len(sorted)
-			if n == 0 {
-				return 0
-			}
-			rank := (p*n + 99) / 100 // ceiling of p*n/100
-			if rank < 1 {
-				rank = 1
-			}
-			if rank > n {
-				rank = n
-			}
-			return float64(sorted[rank-1])
-		}
-		type pathLengthCategory struct {
-			name    string
-			lengths []CallPathLength
-		}
-		for _, cat := range []pathLengthCategory{
-			{"fail_close_sync", failCloseSyncPathLengths},
-			{"fail_close_async", failCloseAsyncPathLengths},
-			{"fail_open_sync", failOpenSyncPathLengths},
-			{"fail_open_async", failOpenAsyncPathLengths},
-		} {
-			var p50, p90, p99, p100 float64
-			if len(cat.lengths) > 0 {
-				sorted := make([]int, len(cat.lengths))
-				for i, pl := range cat.lengths {
-					sorted[i] = pl.Length
-				}
-				slices.Sort(sorted)
-				p50 = percentile(sorted, 50)
-				p90 = percentile(sorted, 90)
-				p99 = percentile(sorted, 99)
-				p100 = float64(sorted[len(sorted)-1])
-			}
-			d.Logger.Infow("Call path length stats", "category", cat.name, "count", len(cat.lengths), "p50", p50, "p90", p90, "p99", p99, "p100", p100)
-			prefix := "call_path_length_" + cat.name + "_"
-			result.RunMetrics[prefix+"p50"] = p50
-			result.RunMetrics[prefix+"p90"] = p90
-			result.RunMetrics[prefix+"p99"] = p99
-			result.RunMetrics[prefix+"p100"] = p100
-			result.RunMetrics["call_path_"+cat.name+"_count"] = float64(len(cat.lengths))
-		}
-
-		// Compute overall call path length percentiles across all categories.
-		var allLengths []int
-		for _, ls := range [][]CallPathLength{failCloseSyncPathLengths, failCloseAsyncPathLengths, failOpenSyncPathLengths, failOpenAsyncPathLengths} {
-			for _, pl := range ls {
-				allLengths = append(allLengths, pl.Length)
-			}
-		}
-		var overallP50, overallP90, overallP99, overallP100 float64
-		if len(allLengths) > 0 {
-			slices.Sort(allLengths)
-			overallP50 = percentile(allLengths, 50)
-			overallP90 = percentile(allLengths, 90)
-			overallP99 = percentile(allLengths, 99)
-			overallP100 = float64(allLengths[len(allLengths)-1])
-		}
-		d.Logger.Infow("Call path length stats", "category", "overall", "count", len(allLengths), "p50", overallP50, "p90", overallP90, "p99", overallP99, "p100", overallP100)
-		result.RunMetrics["call_path_length_overall_p50"] = overallP50
-		result.RunMetrics["call_path_length_overall_p90"] = overallP90
-		result.RunMetrics["call_path_length_overall_p99"] = overallP99
-		result.RunMetrics["call_path_length_overall_p100"] = overallP100
-		result.RunMetrics["call_path_overall_count"] = float64(len(allLengths))
-
-		// Store raw call path lengths in the result for the result.json output.
-		result.CallPathLengths.FailCloseSync = append(result.CallPathLengths.FailCloseSync, failCloseSyncPathLengths...)
-		result.CallPathLengths.FailCloseAsync = append(result.CallPathLengths.FailCloseAsync, failCloseAsyncPathLengths...)
-		result.CallPathLengths.FailOpenSync = append(result.CallPathLengths.FailOpenSync, failOpenSyncPathLengths...)
-		result.CallPathLengths.FailOpenAsync = append(result.CallPathLengths.FailOpenAsync, failOpenAsyncPathLengths...)
-
 		result.RunMetrics[_analysisDurationSecs] += time.Now().Sub(start).Seconds()
 	} // end of per target analysis
+
+	// Aggregate analyzer and call-path statistics once, over the reports collected
+	// from every target.
+	start = time.Now()
+	d.aggregateReportMetrics(&result, reports)
+	result.RunMetrics[_resultAggregationDurationSecs] = time.Now().Sub(start).Seconds()
 
 	for k, v := range d.analyzerDurations {
 		result.RunMetrics[k] += v
@@ -1003,6 +871,156 @@ func (d *Driver) RunOnPackages(ctx context.Context, curService grail.Service, ta
 		return pkgs, ssaPkgs, ssaProg, nil
 	}
 	return clone.Run(ctx, curService.Name)
+}
+
+// aggregateReportMetrics folds the analyzer and call-path statistics of every
+// report into result.
+//
+// This must be called exactly once, after all targets have been analyzed. The
+// counters below accumulate with += and append, while the caller's `reports`
+// slice accumulates across targets, so calling this once per target would fold
+// every earlier target's reports in again on each iteration -- over-counting
+// the analyzer and fail-ness metrics, and duplicating the per-edge
+// AnalyzerMetrics rows, quadratically in the number of targets.
+func (d *Driver) aggregateReportMetrics(result *Result, reports []output.Report) {
+	// Collect the total counts of each analyzer kind for observability purposes.
+	kindStats := make(map[constant.AnalyzerKind]int)
+	// Collect the total counts of each fail-ness status across call paths for observability purposes.
+	failnessPathStats := make(map[constant.Failness]int)
+	// Collect call path lengths for LDA observability.
+	var failCloseSyncPathLengths []CallPathLength
+	var failOpenSyncPathLengths []CallPathLength
+	var failCloseAsyncPathLengths []CallPathLength
+	var failOpenAsyncPathLengths []CallPathLength
+	for _, r := range reports {
+		for _, pr := range r.PathResults {
+			failOpenIntroducedAtLength := 0
+			for k, er := range pr.Edges {
+				// Find the first fail open edge in the path.
+				if failOpenIntroducedAtLength == 0 && er.AnalyzerOutput.Status == constant.FailOpen {
+					failOpenIntroducedAtLength = k + 1
+				}
+
+				src := er.AnalyzerOutput.Source
+				if src != er.AnalyzerOutput.OriginalSource {
+					src = src + "_" + er.AnalyzerOutput.OriginalSource
+				}
+				kindStats[src]++
+
+				// Add the analyzer result to the result for observability purposes.
+				result.AnalyzerMetrics = append(result.AnalyzerMetrics, map[string]string{
+					"run_timestamp":      d.opts.Timestamp,
+					"service":            r.Inbound.Service.Name,
+					"caller":             er.Caller,
+					"callee":             er.Callee,
+					"source_code_link":   er.SourceGraphLink,
+					"edge_result_source": string(src),
+					"edge_result":        string(er.AnalyzerOutput.Status),
+					"error_count":        strconv.Itoa(len(er.Errors)),
+					"error":              strings.Join(er.Errors, "<error_sep>"),
+				})
+			}
+			failnessPathStats[pr.Status]++
+
+			// Track the path length statistics for fail open and fail close paths.
+			if pr.Status == constant.FailOpen {
+				if pr.IsAsync {
+					failOpenAsyncPathLengths = append(failOpenAsyncPathLengths, CallPathLength{Length: len(pr.Edges), FailOpenDistanceFromOutbound: failOpenIntroducedAtLength})
+				} else {
+					failOpenSyncPathLengths = append(failOpenSyncPathLengths, CallPathLength{Length: len(pr.Edges), FailOpenDistanceFromOutbound: failOpenIntroducedAtLength})
+				}
+			} else if pr.Status == constant.FailClose {
+				if pr.IsAsync {
+					failCloseAsyncPathLengths = append(failCloseAsyncPathLengths, CallPathLength{Length: len(pr.Edges)})
+				} else {
+					failCloseSyncPathLengths = append(failCloseSyncPathLengths, CallPathLength{Length: len(pr.Edges)})
+				}
+			}
+		}
+	}
+	d.Logger.Infow("Analyzer result", "kind_stats", kindStats)
+	for k, v := range kindStats {
+		result.RunMetrics[fmt.Sprintf("analyzer_%s_count", strings.ToLower(string(k)))] += float64(v)
+	}
+	d.Logger.Infow("Fail-ness path result", "failness_path_stats", failnessPathStats)
+	for k, v := range failnessPathStats {
+		result.FailnessMetrics[fmt.Sprintf("%s_path_count", strings.ToLower(string(k)))] += float64(v)
+	}
+
+	// Compute call path length percentile statistics for LDA observability.
+	// percentile returns the value at the given percentile (0-100) from a sorted slice using nearest-rank.
+	percentile := func(sorted []int, p int) float64 {
+		n := len(sorted)
+		if n == 0 {
+			return 0
+		}
+		rank := (p*n + 99) / 100 // ceiling of p*n/100
+		if rank < 1 {
+			rank = 1
+		}
+		if rank > n {
+			rank = n
+		}
+		return float64(sorted[rank-1])
+	}
+	type pathLengthCategory struct {
+		name    string
+		lengths []CallPathLength
+	}
+	for _, cat := range []pathLengthCategory{
+		{"fail_close_sync", failCloseSyncPathLengths},
+		{"fail_close_async", failCloseAsyncPathLengths},
+		{"fail_open_sync", failOpenSyncPathLengths},
+		{"fail_open_async", failOpenAsyncPathLengths},
+	} {
+		var p50, p90, p99, p100 float64
+		if len(cat.lengths) > 0 {
+			sorted := make([]int, len(cat.lengths))
+			for i, pl := range cat.lengths {
+				sorted[i] = pl.Length
+			}
+			slices.Sort(sorted)
+			p50 = percentile(sorted, 50)
+			p90 = percentile(sorted, 90)
+			p99 = percentile(sorted, 99)
+			p100 = float64(sorted[len(sorted)-1])
+		}
+		d.Logger.Infow("Call path length stats", "category", cat.name, "count", len(cat.lengths), "p50", p50, "p90", p90, "p99", p99, "p100", p100)
+		prefix := "call_path_length_" + cat.name + "_"
+		result.RunMetrics[prefix+"p50"] = p50
+		result.RunMetrics[prefix+"p90"] = p90
+		result.RunMetrics[prefix+"p99"] = p99
+		result.RunMetrics[prefix+"p100"] = p100
+		result.RunMetrics["call_path_"+cat.name+"_count"] = float64(len(cat.lengths))
+	}
+
+	// Compute overall call path length percentiles across all categories.
+	var allLengths []int
+	for _, ls := range [][]CallPathLength{failCloseSyncPathLengths, failCloseAsyncPathLengths, failOpenSyncPathLengths, failOpenAsyncPathLengths} {
+		for _, pl := range ls {
+			allLengths = append(allLengths, pl.Length)
+		}
+	}
+	var overallP50, overallP90, overallP99, overallP100 float64
+	if len(allLengths) > 0 {
+		slices.Sort(allLengths)
+		overallP50 = percentile(allLengths, 50)
+		overallP90 = percentile(allLengths, 90)
+		overallP99 = percentile(allLengths, 99)
+		overallP100 = float64(allLengths[len(allLengths)-1])
+	}
+	d.Logger.Infow("Call path length stats", "category", "overall", "count", len(allLengths), "p50", overallP50, "p90", overallP90, "p99", overallP99, "p100", overallP100)
+	result.RunMetrics["call_path_length_overall_p50"] = overallP50
+	result.RunMetrics["call_path_length_overall_p90"] = overallP90
+	result.RunMetrics["call_path_length_overall_p99"] = overallP99
+	result.RunMetrics["call_path_length_overall_p100"] = overallP100
+	result.RunMetrics["call_path_overall_count"] = float64(len(allLengths))
+
+	// Store raw call path lengths in the result for the result.json output.
+	result.CallPathLengths.FailCloseSync = append(result.CallPathLengths.FailCloseSync, failCloseSyncPathLengths...)
+	result.CallPathLengths.FailCloseAsync = append(result.CallPathLengths.FailCloseAsync, failCloseAsyncPathLengths...)
+	result.CallPathLengths.FailOpenSync = append(result.CallPathLengths.FailOpenSync, failOpenSyncPathLengths...)
+	result.CallPathLengths.FailOpenAsync = append(result.CallPathLengths.FailOpenAsync, failOpenAsyncPathLengths...)
 }
 
 func (d *Driver) logResults(reports []output.Report) {
