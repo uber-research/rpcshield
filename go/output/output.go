@@ -7,6 +7,8 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/bazelbuild/rules_go/go/runfiles"
@@ -131,6 +133,56 @@ func (r *Report) Merge(otherReport Report) {
 	// Merge the status of the reports following the precedence order: FailClose > FailUnknownWithError > FailUnknown > FailOpen.
 	// If at least one of the reports is FailClose, then the merged report status should be FailClose.
 	r.Status = utils.MergeStatus(r.Status, otherReport.Status, constant.OrderMapFailClosePriority)
+}
+
+// SortPathResults orders the report's path results into a deterministic,
+// canonical order.
+//
+// RPCShield enumerates call paths in a nondeterministic order: the ordering
+// derives from Go map iteration during call-tree traversal. As a result, the
+// subset of paths stored per inbound-outbound quadruple (capped by
+// constant.MaxPathsToStoreForQuadruple) and the "first N paths" surfaced
+// downstream (e.g. the paths listed in a Jira ticket via Report.Diagnostics)
+// could vary between otherwise-identical runs. Sorting by a stable key derived
+// from each path's status and edges restores run-to-run determinism.
+func (r *Report) SortPathResults() {
+	// Compute each path's sort key exactly once up front, so keys are not
+	// recomputed on every comparison during the sort.
+	type keyedPath struct {
+		key  string
+		path PathResult
+	}
+	decorated := make([]keyedPath, len(r.PathResults))
+	for i, p := range r.PathResults {
+		decorated[i] = keyedPath{key: p.sortKey(), path: p}
+	}
+	slices.SortFunc(decorated, func(a, b keyedPath) int {
+		return strings.Compare(a.key, b.key)
+	})
+	for i, d := range decorated {
+		r.PathResults[i] = d.path
+	}
+}
+
+// sortKey builds a stable, canonical ordering key for the path result from its
+// status and the sequence of caller->callee edges it traverses.
+func (p PathResult) sortKey() string {
+	var sb strings.Builder
+	sb.WriteString(string(p.Status))
+	if p.IsAsync {
+		sb.WriteString("|async")
+	}
+	for _, e := range p.Edges {
+		sb.WriteByte('|')
+		sb.WriteString(e.Caller)
+		sb.WriteByte('>')
+		sb.WriteString(e.Callee)
+		sb.WriteByte('@')
+		sb.WriteString(e.Filepath)
+		sb.WriteByte(':')
+		sb.WriteString(strconv.Itoa(e.CalleeLineNo))
+	}
+	return sb.String()
 }
 
 // Diagnostics returns a string representation of the report.
