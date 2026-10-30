@@ -14,7 +14,6 @@ import (
 	"github.com/uber-research/rpcshield/go/grail"
 	"github.com/uber-research/rpcshield/go/loader"
 	"go.uber.org/zap"
-	"golang.org/x/tools/go/packages"
 )
 
 func TestHTTPInboundFinder__Gorilla(t *testing.T) {
@@ -168,6 +167,65 @@ func TestHTTPInboundFinder__Gorilla(t *testing.T) {
 	require.ElementsMatch(t, expected, got)
 }
 
+func TestHTTPInboundFinder__ServeMux(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewExample().Sugar()
+	dummyService := grail.Service{Name: "servemux-testdata", Tier: 1}
+
+	ssaProg, entryPkg, allPkgs, err := loader.LoadSSAWithGoPath(
+		"rpcshield",
+		[]string{"exampleapps", "servemuxhttp", "servemuxhttp-anal"},
+		"github.com/uber-research/rpcshield/go/exampleapps/servemuxhttp",
+	)
+	require.NoError(t, err)
+
+	codebase, err := fty.NewCodebase(logger, entryPkg, allPkgs, map[string]bool{} /* keepPkgs */)
+	if err != nil {
+		t.Fatalf("Failed to make codebase object. Reason: %v", err)
+	}
+
+	muxProviders := []MuxProvider{
+		NewServeMuxProvider(logger, dummyService, codebase),
+	}
+	hf := NewInboundFinder(logger, muxProviders)
+	ibs, err := hf.Find(dummyService, ssaProg)
+	require.NoError(t, err)
+
+	type InboundRepr struct {
+		PkgPath       string
+		FullFuncName  string
+		CanonicalName string
+	}
+
+	const pkg = "github.com/uber-research/rpcshield/go/exampleapps/servemuxhttp"
+	expected := []InboundRepr{
+		{PkgPath: pkg, FullFuncName: pkg + ".homeHandler", CanonicalName: "/"},
+		{PkgPath: pkg, FullFuncName: pkg + ".pingHandler", CanonicalName: "/ping"},
+		{PkgPath: pkg, FullFuncName: pkg + ".setupRoutes$1", CanonicalName: "/closure"},
+		{PkgPath: pkg, FullFuncName: pkg + ".pingHandler", CanonicalName: "GET /items"},
+		// Handle(pattern, http.HandlerFunc(wrapLogger(homeHandler))) unwraps to homeHandler.
+		{PkgPath: pkg, FullFuncName: pkg + ".homeHandler", CanonicalName: "/wrapped"},
+		// Registered via delegation to addMoreRoutes(mux).
+		{PkgPath: pkg, FullFuncName: pkg + ".pingHandler", CanonicalName: "/more/ping"},
+	}
+
+	got := make([]InboundRepr, 0, len(ibs))
+	s := mapper.SignatureToASTMap(allPkgs)
+	for _, ib := range ibs {
+		got = append(got, InboundRepr{
+			PkgPath:       ib.Pkg.PkgPath,
+			FullFuncName:  ib.Func.FullName(),
+			CanonicalName: ib.CanonicalName,
+		})
+		if _, ok := s.StoA[ib.Func.Type().(*types.Signature)]; !ok {
+			require.True(t, ok, "Could not find signature for inbound", ib)
+		}
+	}
+
+	require.ElementsMatch(t, expected, got)
+}
+
 func TestHTTPInboundFinder__Gin(t *testing.T) {
 	t.Parallel()
 
@@ -247,7 +305,6 @@ func TestFind_NilSSAProgram(t *testing.T) {
 	assert.Error(t, err, "should return an error when SSA program is nil")
 	assert.Contains(t, err.Error(), "ssa program is nil", "error message should indicate the nil program")
 }
-
 func TestFind_EmptyCodebase(t *testing.T) {
 	t.Parallel()
 
@@ -266,6 +323,7 @@ func TestFind_EmptyCodebase(t *testing.T) {
 		t.Fatalf("Failed to make codebase object. Reason: %v", err)
 	}
 
+	// With codebase package info: handlers defined in the service codebase resolve.
 	muxProviders := []MuxProvider{
 		NewGorillaMuxProvider(
 			logger,
@@ -275,14 +333,24 @@ func TestFind_EmptyCodebase(t *testing.T) {
 	}
 	hf := NewInboundFinder(logger, muxProviders)
 
-	// With package info
 	ibs, err := hf.Find(dummyService, ssaProg)
 	require.NoError(t, err)
 	numWith := len(ibs)
 
-	// Without package map
-	codebase.PkgMap = make(map[string]*packages.Package)
-	ibs, err = hf.Find(dummyService, ssaProg)
+	// Without codebase packages: handler resolution is scoped to the service
+	// codebase, so an empty codebase yields fewer (no) inbounds. The provider
+	// snapshots the codebase scope at construction, so build a fresh one.
+	codebase.CodebaseOnly = nil
+	emptyProviders := []MuxProvider{
+		NewGorillaMuxProvider(
+			logger,
+			dummyService,
+			codebase,
+		),
+	}
+	hfEmpty := NewInboundFinder(logger, emptyProviders)
+
+	ibs, err = hfEmpty.Find(dummyService, ssaProg)
 	require.NoError(t, err)
 	numWithout := len(ibs)
 
