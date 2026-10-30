@@ -22,6 +22,26 @@ func wrapNotify(f func()) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { f() })
 }
 
+// appHandler is a codebase implementation of http.Handler, reachable only
+// through the interface when a handler is registered as an interface-typed
+// method value.
+type appHandler struct{}
+
+func (appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {}
+
+// embedHandler also satisfies http.Handler, but through a promoted stdlib
+// method: its ServeHTTP is owned by net/http, which ships without loaded
+// source, so it must be filtered out rather than reported as an inbound.
+type embedHandler struct {
+	http.HandlerFunc
+}
+
+// params holds an interface-typed handler, mirroring infra structs whose
+// handler field is an http.Handler.
+type params struct {
+	HTTPHandler http.Handler
+}
+
 // group holds the route-registration methods. It mirrors real frameworks (e.g.
 // gin, whose verb methods live on an embedded *gin.RouterGroup) where the
 // registration methods are promoted from an embedded sub-struct. A call on the
@@ -63,6 +83,19 @@ func setupRoutes() *router {
 	// Wrapped non-handler argument -> exercises the fall-through to the
 	// "call itself makes a handler" heuristic when every candidate is empty.
 	r.Handle("/wrapped", wrapNotify(notify))
+
+	// Method value on a concrete source-less type (*http.ServeMux) -> must be
+	// skipped rather than recorded as a phantom inbound.
+	mux := http.NewServeMux()
+	r.HandleFunc("/sourceless", mux.ServeHTTP)
+
+	// Method value on an interface-typed field -> the leaf resolves to
+	// net/http's abstract Handler.ServeHTTP, so the parser must resolve it to
+	// the concrete codebase implementations instead.
+	p := params{HTTPHandler: appHandler{}}
+	r.HandleFunc("/ifacevalue", p.HTTPHandler.ServeHTTP)
+
+	var _ http.Handler = embedHandler{}
 
 	return r
 }
