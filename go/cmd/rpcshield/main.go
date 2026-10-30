@@ -133,6 +133,7 @@ func main() {
 		rtaFlavor := wpaFlags.String("rta-flavor", "prta_kumo_nonblocking", "RTA implementation flavor: srta, srta_opt, srta_kumo, srta_kumo_random, prta_naive, prta_nonblocking, prta_kumo, prta_kumo_nonblocking, stdlib, or cha")
 		rtaNumWorkers := wpaFlags.String("rta-num-workers", strconv.Itoa(runtime.GOMAXPROCS(0)), "number of workers for parallel RTA flavors")
 		disableParallelCallTree := wpaFlags.Bool("disable-parallel-calltree", false, "disable parallel call tree computation, default is false")
+		canonicalEdgeOrder := wpaFlags.Bool("canonical-edge-order", false, "sort call-graph outgoing edges deterministically before path exploration so convergence pruning does not depend on package load order")
 		permutationThreshold := wpaFlags.Int64("permutation-threshold", 100, "number of times the same function-set hash must be observed reaching a sink before permutation detection triggers (0 to disable)")
 		tierOverridesRaw := wpaFlags.String("tier-overrides", os.Getenv("TIER_OVERRIDES"), "comma-separated list of service:tier overrides (e.g., svc1:0,svc2:1)")
 
@@ -198,6 +199,7 @@ func main() {
 			RTAFlavor:                    *rtaFlavor,
 			RTANumWorkers:                *rtaNumWorkers,
 			DisableParallelCallTree:      *disableParallelCallTree,
+			CanonicalEdgeOrder:           *canonicalEdgeOrder,
 			PermutationThreshold:         *permutationThreshold,
 			TierOverrides:                tierOverrides,
 			Analyzers:                    analyzersMap,

@@ -180,6 +180,10 @@ type Config struct {
 	// the wrapper-package recipe that lets a real internal package delegate to this one without
 	// requiring existing call sites to change their imports.
 	SafeGoPkgPath string
+	// CanonicalEdgeOrder sorts every call-graph node's outgoing edges into a
+	// deterministic order before call-tree exploration, so convergence pruning does
+	// not depend on the order packages happened to be loaded in.
+	CanonicalEdgeOrder bool
 }
 
 // builderImpl is a struct that builds a call graph from a set of packages.

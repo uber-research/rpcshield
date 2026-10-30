@@ -1,10 +1,12 @@
 package graph
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +76,18 @@ func (b *builderImpl) buildCallTree(graph *callgraph.Graph) (map[*ssa.Function]*
 
 	sinkCanonicalNames := b.sinkCanonicalNames()
 	sourceCanonicalNames := b.sourceCanonicalNames()
+
+	// Optionally impose a canonical order on every node's outgoing edges so that
+	// the depth-first exploration below does not depend on the order the packages
+	// happened to be loaded in. Convergence pruning is order-sensitive: whichever
+	// functions cross MaxFunctionVisits first are marked as convergence points and
+	// have their subtrees cut, so two loaders that produce identical graphs but
+	// different edge orderings otherwise disagree on the discovered path set (and
+	// hence on fail-close/fail-open counts). Done once here, before any worker
+	// starts, so the parallel exploration below only ever reads these slices.
+	if b.config.CanonicalEdgeOrder {
+		sortOutEdges(graph)
+	}
 
 	// Step 2: Initialize result channels
 	b.logger.Debugf("Building call tree for %d source functions and %d sink functions", len(b.inboundsSSA), len(b.outboundsSSA))
@@ -450,4 +464,54 @@ func (b *builderImpl) traverse(node *callgraph.Node, path []*callgraph.Edge, pat
 			b.traverse(edge.Callee, newPath, paths)
 		}
 	}
+}
+
+// sortOutEdges imposes a deterministic total order on every node's outgoing
+// edges, in place. The order is (callee name, call-site position, callee node
+// ID): a caller can hold several edges to the same callee from different call
+// sites, so the callee name alone is not a total order, and the node ID breaks
+// any remaining tie so the result never depends on the incoming slice order.
+//
+// Only the ordering of each Out slice changes; no edge is added or removed, so
+// node and edge counts are unaffected.
+func sortOutEdges(graph *callgraph.Graph) {
+	for _, node := range graph.Nodes {
+		if node == nil || len(node.Out) < 2 {
+			continue
+		}
+		slices.SortFunc(node.Out, func(a, b *callgraph.Edge) int {
+			if c := strings.Compare(calleeName(a), calleeName(b)); c != 0 {
+				return c
+			}
+			if c := cmp.Compare(sitePos(a), sitePos(b)); c != 0 {
+				return c
+			}
+			return cmp.Compare(calleeID(a), calleeID(b))
+		})
+	}
+}
+
+// calleeName returns the callee's fully qualified name, or "" for a leaf edge.
+func calleeName(e *callgraph.Edge) string {
+	if e.Callee == nil || e.Callee.Func == nil {
+		return ""
+	}
+	return e.Callee.Func.String()
+}
+
+// sitePos returns the edge's call-site offset, or -1 when it has no site
+// (synthetic edges), keeping those ahead of any real call site.
+func sitePos(e *callgraph.Edge) int {
+	if e.Site == nil {
+		return -1
+	}
+	return int(e.Site.Pos())
+}
+
+// calleeID returns the callee node's ID, or -1 for a leaf edge.
+func calleeID(e *callgraph.Edge) int {
+	if e.Callee == nil {
+		return -1
+	}
+	return e.Callee.ID
 }
