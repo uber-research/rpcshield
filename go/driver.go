@@ -442,6 +442,13 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		// fails with "no such package". Canonicalize once here so every downstream helper
 		// sees the same //-prefixed form and cwd doesn't matter.
 		target = canonicalizeLabel(target)
+		// Resolve the import path of the code actually compiled into target once, up front:
+		// for go_binary(embed=[":lib"]) targets whose embedded library lives in another
+		// directory, the directory-derived guess is wrong (see resolveTargetImportPath).
+		targetPkgPath := dirBasedImportPath(target)
+		if d.opts.PackageSource == nil {
+			targetPkgPath = resolveTargetImportPath(d.Runner, d.Logger, filepath.Join(d.WorkspaceRoot, "bin", "bazel"), target)
+		}
 		d.Logger.Info("target", tidx, " : ", target)
 
 		var pkgs []*packages.Package
@@ -459,7 +466,6 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			result.RunMetrics[_pkgCount] += float64(len(pkgs))
 		} else if d.opts.BazelLoader != nil && useBazelLoader(serviceName, d.opts.Config.BazelLoaderServices, d.opts.ForceLoaderMode) {
 			d.Logger.Infow("Using bazel loader")
-			targetPkgPath := strings.Split(strings.TrimPrefix(target, "//src/"), ":")[0]
 			d.Logger.Infow("Loading packages", "target_pkg_path", targetPkgPath)
 			bkpkgs, err := d.opts.BazelLoader(targetPkgPath)
 
@@ -560,7 +566,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		d.Logger.Infow("IsGlueService", "is_glue", isGlue)
 
 		// Find the binary package as the entry point.
-		entryPkg, err := d.findPackageFromTarget(target, pkgs)
+		entryPkg, err := d.findPackageFromTarget(targetPkgPath, pkgs)
 		if err != nil {
 			return result, fmt.Errorf("find entry package: %w", err)
 		}
@@ -1652,9 +1658,8 @@ func (d *Driver) findTargets(serviceName string) ([]string, error) {
 	return resolver.FindTargets(serviceName)
 }
 
-// findPackageFromTarget finds the package (hinted by the binary bazel target) as the entry point.
-func (d *Driver) findPackageFromTarget(target string, pkgs []*packages.Package) (*packages.Package, error) {
-	targetPkgPath := strings.Split(strings.TrimPrefix(target, "//src/"), ":")[0]
+// findPackageFromTarget finds the entry-point package given its resolved import path.
+func (d *Driver) findPackageFromTarget(targetPkgPath string, pkgs []*packages.Package) (*packages.Package, error) {
 	for _, pkg := range pkgs {
 		if pkg.PkgPath == targetPkgPath {
 			return pkg, nil
@@ -1838,6 +1843,49 @@ func getMaxUsedDram() (int64, error) {
 		return 0, fmt.Errorf("failed to get resource usage: %w", err)
 	}
 	return rusage.Maxrss, nil
+}
+
+// dirBasedImportPath derives a target's import path from its label directory alone. It is the
+// right answer for the common case where a go_binary and the go_library it compiles share a
+// directory; see resolveTargetImportPath for the embed-in-another-directory case.
+func dirBasedImportPath(target string) string {
+	return strings.Split(strings.TrimPrefix(target, "//src/"), ":")[0]
+}
+
+// resolveTargetImportPath returns the Go import path of the source code compiled into target.
+// For most go_binary targets this is simply target's own directory. For go_binary targets
+// declared as `go_binary(name="foo", embed=[":lib"])` where the embedded go_library lives in
+// a different directory, target itself declares no importpath -- the compiled code is the embed
+// target's library, whose import path is that library's directory.
+//
+// Resolution walks the target's `embed` attribute via a narrow single-attribute bazel query:
+//
+//	bazel query 'labels("embed", //TARGET)' --output=label
+//
+// A non-empty result yields the embedded library's directory-derived import path; an empty
+// result (self-contained target) or a query error falls back to target's own directory, so the
+// common case is unaffected. The query is deliberately narrow -- one attribute on one target
+// with no graph traversal -- so it cannot pull in data-only or tool dependencies.
+func resolveTargetImportPath(runner utils.Runner, logger *zap.SugaredLogger, bazelPath, target string) string {
+	dirBased := dirBasedImportPath(target)
+	query := fmt.Sprintf(`labels("embed", %s)`, target)
+	out, _, err := utils.ExecCommand(runner, bazelPath, "query", "--output=label", query)
+	if err != nil {
+		logger.Debugw("resolveTargetImportPath: embed query failed, falling back to target dir", "target", target, "dir", dirBased, "error", err)
+		return dirBased
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "//src/") {
+			continue
+		}
+		embedded := dirBasedImportPath(line)
+		if embedded != dirBased {
+			logger.Infow("resolveTargetImportPath: target embeds a library from a different directory; using embed's import path", "target", target, "target_dir", dirBased, "embed_label", line, "resolved_import_path", embedded)
+		}
+		return embedded
+	}
+	return dirBased
 }
 
 // canonicalizeLabel normalizes a Bazel target label to its fully-qualified form so downstream
