@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/token"
 	"go/types"
 	"os"
 	"os/exec"
@@ -39,7 +38,6 @@ import (
 	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/go/ssa"
 )
 
 var _defaultDriverOptions = DriverOptions{
@@ -302,7 +300,7 @@ func TestDiagnostics(t *testing.T) {
 	t.Parallel()
 
 	testPkg := rpcshieldtest.LoadrpcshieldDemoPackages()
-	entryPkg, allPkgs, ssaProg, ssaPkgs := testPkg.Entry, testPkg.All, testPkg.SSAProg, testPkg.SSAPkgs
+	entryPkg, allPkgs, ssaProg := testPkg.Entry, testPkg.All, testPkg.SSAProg
 	require.NotNil(t, entryPkg)
 	require.Greater(t, len(allPkgs), 0)
 	// Dump diagnostics.
@@ -314,10 +312,31 @@ func TestDiagnostics(t *testing.T) {
 	serviceMapper := servicemapping.New([]grail.Service{{Name: "lottery", Tier: 5}}, nil /* provider */, nil /* logger */)
 	aiClient := genaimock.NewMockClient(ctrl)
 	d := NewDriver(workspace, runner, gp, serviceMapper, aiClient, []grail.Service{}, nil /* productionTrafficRecords */, nil /* logger */, _defaultDriverOptions)
-	numPackageWoErrors, numPackagesWithErrors, mains := d.dumpPackageDiagnostics(allPkgs, ssaProg, ssaPkgs)
+	numPackageWoErrors, numPackagesWithErrors := d.dumpPackageDiagnostics(allPkgs)
 	assert.Greater(t, numPackageWoErrors, 0)
 	assert.Equal(t, 0, numPackagesWithErrors)
-	assert.Greater(t, len(mains), 0)
+	// The demo app builds a binary, so the SSA program it produces has a main package.
+	assert.Greater(t, len(d.getMain(ssaProg)), 0)
+}
+
+// TestDumpPackageDiagnosticsMatchesSSA pins the equivalence the pre-SSA check relies on: a package
+// is broken exactly when ssautil.AllPackages declines to create an SSA package for it.
+func TestDumpPackageDiagnosticsMatchesSSA(t *testing.T) {
+	t.Parallel()
+
+	testPkg := rpcshieldtest.LoadrpcshieldDemoPackages()
+	allPkgs, ssaProg := testPkg.All, testPkg.SSAProg
+	require.Greater(t, len(allPkgs), 0)
+
+	d := &Driver{Logger: zap.NewNop().Sugar()}
+	fromSSA := 0
+	for _, p := range allPkgs {
+		if ssaProg.Package(p.Types) == nil {
+			fromSSA++
+		}
+	}
+	_, fromFields := d.dumpPackageDiagnostics(allPkgs)
+	assert.Equal(t, fromSSA, fromFields)
 }
 
 func TestDumpPackageDiagnostics_PackagesWithErrors(t *testing.T) {
@@ -357,23 +376,12 @@ func TestDumpPackageDiagnostics_PackagesWithErrors(t *testing.T) {
 
 	pkgs := []*packages.Package{pkgWithError, pkgWithoutError}
 
-	// Create ssaProg
-	fset := token.NewFileSet()
-	ssaProg := ssa.NewProgram(fset, ssa.SanityCheckFunctions)
-
-	// Create ssaPkgs
-	ssaPkgWithError := (*ssa.Package)(nil)
-	ssaPkgWithoutError := ssaProg.CreatePackage(typesPkgWithoutError, nil, nil, false)
-
-	ssaPkgs := []*ssa.Package{ssaPkgWithError, ssaPkgWithoutError}
-
 	// Call the function
-	packageWoErrors, packagesWithErrors, mains := d.dumpPackageDiagnostics(pkgs, ssaProg, ssaPkgs)
+	packageWoErrors, packagesWithErrors := d.dumpPackageDiagnostics(pkgs)
 
 	// Assert the outputs
 	assert.Equal(t, 1, packagesWithErrors, "Expected one package with errors")
 	assert.Equal(t, 1, packageWoErrors, "Expected one package without errors")
-	assert.Equal(t, 0, len(mains), "Expected mains to be not 0")
 }
 
 func TestDumpPackageDiagnostics_AllPackagesWithErrors(t *testing.T) {
@@ -413,21 +421,47 @@ func TestDumpPackageDiagnostics_AllPackagesWithErrors(t *testing.T) {
 
 	pkgs := []*packages.Package{pkgWithError1, pkgWithError2}
 
-	// Create ssaProg
-	fset := token.NewFileSet()
-	ssaProg := ssa.NewProgram(fset, ssa.SanityCheckFunctions)
-
-	// ssaPkgs with nil entries
-	ssaPkgs := []*ssa.Package{nil, nil}
-
 	// Call the function
-	packageWoErrors, packagesWithErrors, mains := d.dumpPackageDiagnostics(pkgs, ssaProg, ssaPkgs)
+	packageWoErrors, packagesWithErrors := d.dumpPackageDiagnostics(pkgs)
 
 	// Assert the outputs
 	assert.Equal(t, 2, packagesWithErrors, "Expected two packages with errors")
 	assert.Equal(t, 0, packageWoErrors, "Expected zero packages without errors")
-	assert.Equal(t, 0, len(mains), "Expected mains to be not 0")
+}
 
+// TestDumpPackageDiagnostics_IllTyped covers the package that type-checked far enough to get a
+// types.Package but was poisoned by an ill-typed dependency. ssautil.AllPackages skips it, so the
+// pre-SSA check has to count it as broken.
+func TestDumpPackageDiagnostics_IllTyped(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	ctrl := gomock.NewController(t)
+	runner := utilsmock.NewMockRunner(ctrl)
+	gp := bazelmock.NewMockGoPathWrapper(ctrl)
+
+	serviceMapper := servicemapping.New([]grail.Service{{Name: "lottery", Tier: 5}}, nil /* provider */, nil /* logger */)
+	aiClient := genaimock.NewMockClient(ctrl)
+	d := NewDriver(workspace, runner, gp, serviceMapper, aiClient, []grail.Service{}, nil /* productionTrafficRecords */, nil /* logger */, _defaultDriverOptions)
+
+	poisoned := &packages.Package{
+		Name:      "poisoned",
+		PkgPath:   "path/to/poisoned",
+		Types:     types.NewPackage("path/to/poisoned", "poisoned"),
+		IllTyped:  true,
+		TypesInfo: &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)},
+	}
+	healthy := &packages.Package{
+		Name:      "healthy",
+		PkgPath:   "path/to/healthy",
+		Types:     types.NewPackage("path/to/healthy", "healthy"),
+		TypesInfo: &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)},
+	}
+
+	packageWoErrors, packagesWithErrors := d.dumpPackageDiagnostics([]*packages.Package{poisoned, healthy})
+
+	assert.Equal(t, 1, packagesWithErrors, "Expected the ill-typed package to count as broken")
+	assert.Equal(t, 1, packageWoErrors, "Expected one package without errors")
 }
 
 // Generated by AutoCover
