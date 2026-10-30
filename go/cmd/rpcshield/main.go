@@ -109,7 +109,8 @@ func main() {
 		blockProfile := wpaFlags.String("blockprofile", "", "the path to write the block profile to, disabled if not specified")
 		logLevel := zap.InfoLevel
 		wpaFlags.Var(&logLevel, "loglevel", "log level (debug|info|warn|error)")
-		noOBClipByTier := wpaFlags.Bool("no-ob-clip-by-tier", false, "disable ob-tier clipping, default is false")
+		skipOBTierFilter := wpaFlags.Bool("skip-ob-tier-filter", strings.EqualFold(os.Getenv("SKIP_OB_TIER_FILTER"), "true"), "skip outbound tier filtering, default is $SKIP_OB_TIER_FILTER")
+		skipProdTrafficFilter := wpaFlags.Bool("skip-prod-traffic-filter", strings.EqualFold(os.Getenv("SKIP_PROD_TRAFFIC_FILTER"), "true"), "skip production traffic filtering, default is $SKIP_PROD_TRAFFIC_FILTER")
 		disableSCCPAnalysis := wpaFlags.Bool("disable-sccp-analysis", false, "disable SCCP (Sparse Conditional Constant Propagation) analysis, default is false")
 		nilOtherSourcesAfterSrc := wpaFlags.Bool("nil-other-sources-after-src", false, "set OtherSources to Nil when they are after Src in the CFG, default is false")
 		cachedGrailAllServicesJSON := wpaFlags.String("use-cached-grail-all-services-json", "auto", "the path to the cached Grail all services JSON file, `auto` or `refresh`")
@@ -184,7 +185,8 @@ func main() {
 			AllocsProfile:                *allocsProfile,
 			MutexProfile:                 *mutexProfile,
 			BlockProfile:                 *blockProfile,
-			NoOBClipByTier:               *noOBClipByTier,
+			SkipOBTierFilter:             *skipOBTierFilter,
+			SkipProdTrafficFilter:        *skipProdTrafficFilter,
 			GitSHA:                       *gitSHA,
 			CSV:                          *csv,
 			HTML:                         *html,

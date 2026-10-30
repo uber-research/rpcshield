@@ -18,7 +18,7 @@ open. A single fail-open hop anywhere on a path makes that whole path fail-open;
 single fail-close path is enough to call the whole inbound/outbound pair fail-close, even if other
 paths between the same two points fail open. This applies to any dependency, but by default
 RPCShield scopes its analysis to **cross-tier** outbound dependencies (a more-critical service
-calling a less-critical one, `DriverOptions.NoOBClipByTier` lifts this scoping), because that's
+calling a less-critical one, `DriverOptions.SkipOBTierFilter` lifts this scoping), because that's
 where a downstream failure causing an upstream failure is most consequential: it couples a critical
 service's own availability to a dependency that wasn't built to the same reliability bar.
 
@@ -201,7 +201,7 @@ variants). Two different merge rules apply at two different levels:
 
 This is also where the criticality-tier framing from the intro matters: `FailClose` is the correct,
 desired outcome in general. RPCShield only bothers analyzing outbound calls to a **lower**
-criticality tier than the calling service in the first place (`DriverOptions.NoOBClipByTier` gates
+criticality tier than the calling service in the first place (`DriverOptions.SkipOBTierFilter` gates
 this filtering) — because a tier-0 service propagating (`FailClose`) a failure from a
 less-critical, less-reliably-operated downstream is exactly the scenario where correct error
 handling still produces an availability problem: the critical service's own uptime becomes coupled

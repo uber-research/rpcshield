@@ -90,8 +90,10 @@ type Driver struct {
 
 // DriverOptions is the optional configurations for the driver.
 type DriverOptions struct {
-	// NoOBClipByTier is the flag to disable OB clipping by the callee tiers.
-	NoOBClipByTier bool
+	// SkipOBTierFilter is the flag to disable OB clipping by the callee tiers.
+	SkipOBTierFilter bool
+	// SkipProdTrafficFilter disables skipping services without observed inbound or outbound production traffic.
+	SkipProdTrafficFilter bool
 	// Report indicates whether to report rpcshield's findings.
 	Report bool
 	// Analyzers is the list of analyzers (SSA, AST, LLM) to run for fail-ness detection.
@@ -423,14 +425,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 
 	// If we have not observed any inbound or outbound points in production for the past 30 days, we can skip the
 	// analysis without errors. However, if CGConstructionOnly is set, we still run for benchmarking purposes.
-	noProdIBTraffic := slices.ContainsFunc(d.ProdServiceTrafficRecords, func(r query.ProdServiceTrafficRecord) bool {
-		return r.ServiceName == curService.Name && !r.AppearedAsCallee
-	})
-	noProdOBTraffic := slices.ContainsFunc(d.ProdServiceTrafficRecords, func(r query.ProdServiceTrafficRecord) bool {
-		return r.ServiceName == curService.Name && !r.AppearedAsCaller
-	})
-	d.Logger.Infow("NoProdIBTraffic", "no_prod_ib_traffic", noProdIBTraffic, "no_prod_ob_traffic", noProdOBTraffic)
-	if (noProdIBTraffic || noProdOBTraffic) && !d.opts.CGConstructionOnly {
+	if d.shouldSkipForMissingProdTraffic(curService) {
 		d.Logger.Infow("No inbound or outbound points found in production for the past 30 days, skipping the analysis")
 		result.Status = SuccessNoProdIBOBTraffic
 		return result, nil
@@ -631,7 +626,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			continue
 		}
 
-		if d.opts.NoOBClipByTier {
+		if d.opts.SkipOBTierFilter {
 			d.Logger.Warnw("OB clipping by tier is disabled by the driver options")
 		} else {
 			filteredOBs := d.filterIrrelevantOutbounds(outbounds, curService.Tier)
@@ -1764,6 +1759,22 @@ func (d *Driver) countOutboundsType(outbounds []fty.OutboundPoint) map[fty.Outbo
 	return countMap
 }
 
+func (d *Driver) shouldSkipForMissingProdTraffic(curService grail.Service) bool {
+	noProdIBTraffic := slices.ContainsFunc(d.ProdServiceTrafficRecords, func(r query.ProdServiceTrafficRecord) bool {
+		return r.ServiceName == curService.Name && !r.AppearedAsCallee
+	})
+	noProdOBTraffic := slices.ContainsFunc(d.ProdServiceTrafficRecords, func(r query.ProdServiceTrafficRecord) bool {
+		return r.ServiceName == curService.Name && !r.AppearedAsCaller
+	})
+	d.Logger.Infow(
+		"Production traffic gate",
+		"no_prod_ib_traffic", noProdIBTraffic,
+		"no_prod_ob_traffic", noProdOBTraffic,
+		"skip_gate", d.opts.SkipProdTrafficFilter,
+	)
+	return (noProdIBTraffic || noProdOBTraffic) && !d.opts.CGConstructionOnly && !d.opts.SkipProdTrafficFilter
+}
+
 // processReportsForOutput processes the reports to create user-friendly output reports by limiting
 // the number of paths per fail-ness type. This helps keep the output manageable for CSV and HTML reports.
 func (d *Driver) processReportsForOutput(reports []output.Report) []output.Report {
@@ -1842,7 +1853,8 @@ func (d *Driver) processReportsForOutput(reports []output.Report) []output.Repor
 
 // resolveHTTPOutboundService resolves the HTTP outbound service name in per call path manner
 // one HTTP outbound endpoint could be shared by multiple services, so per-call path resolution is needed.
-// return the resolved paths and filter out the paths that can not find the service name and break the tier filtering.
+// return the resolved paths and filter out the paths that cannot find the service name.
+// Tier filtering is skipped when outbound clipping by tier is disabled.
 func (d *Driver) resolveHTTPOutboundService(paths []*graph.CallPath, curService grail.Service) ([]*graph.CallPath, int, int, []fty.OutboundPoint) {
 	resolvedPaths := make([]*graph.CallPath, 0, len(paths))
 	totalHTTPPathCount := 0
@@ -1888,9 +1900,10 @@ func (d *Driver) resolveHTTPOutboundService(paths []*graph.CallPath, curService 
 		}
 		if !matchedService {
 			d.Logger.Warnw("Failed to match service name for HTTP outbound path", "path", path)
+			continue
 		}
 		// Tier filtering HTTP outbounds are per-path-based, we need to do tier filtering after the service name resolution.
-		if matchedService && curService.Tier < path.Outbound.Service.Tier {
+		if d.opts.SkipOBTierFilter || curService.Tier < path.Outbound.Service.Tier {
 			resolvedPaths = append(resolvedPaths, path)
 		} else {
 			d.Logger.Warnw("HTTP outbound path is not lower than the service tier", "path", path)
