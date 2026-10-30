@@ -1016,9 +1016,29 @@ func TestDriver_HTTP_OB_Resolving(t *testing.T) {
 		Logger:                       zap.NewNop().Sugar(),
 	}
 	require.Greater(t, len(paths), 0)
-	resolvedPaths, _, _, _ := driver.resolveHTTPOutboundService(paths, grail.Service{Name: "rpcshielddemo", Tier: 2})
-	require.Equal(t, len(resolvedPaths), 3)
-	require.Equal(t, resolvedPaths[0].Outbound.Service.Name, "httpservicefoo")
+
+	tests := []struct {
+		name              string
+		callerTier        int
+		noOBClipByTier    bool
+		wantResolvedPaths int
+	}{
+		{name: "lower-tier caller retained with clipping", callerTier: 2, wantResolvedPaths: 3},
+		{name: "same-tier caller filtered with clipping", callerTier: 5, wantResolvedPaths: 0},
+		{name: "higher-tier caller filtered with clipping", callerTier: 6, wantResolvedPaths: 0},
+		{name: "same-tier caller retained without clipping", callerTier: 5, noOBClipByTier: true, wantResolvedPaths: 3},
+		{name: "higher-tier caller retained without clipping", callerTier: 6, noOBClipByTier: true, wantResolvedPaths: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driver.opts.NoOBClipByTier = tt.noOBClipByTier
+			resolvedPaths, _, _, _ := driver.resolveHTTPOutboundService(paths, grail.Service{Name: "rpcshielddemo", Tier: tt.callerTier})
+			require.Len(t, resolvedPaths, tt.wantResolvedPaths)
+			for _, path := range resolvedPaths {
+				require.Equal(t, "httpservicefoo", path.Outbound.Service.Name)
+			}
+		})
+	}
 }
 
 func TestEnrichReportMetrics(t *testing.T) {

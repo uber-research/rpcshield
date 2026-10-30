@@ -1842,7 +1842,8 @@ func (d *Driver) processReportsForOutput(reports []output.Report) []output.Repor
 
 // resolveHTTPOutboundService resolves the HTTP outbound service name in per call path manner
 // one HTTP outbound endpoint could be shared by multiple services, so per-call path resolution is needed.
-// return the resolved paths and filter out the paths that can not find the service name and break the tier filtering.
+// return the resolved paths and filter out the paths that cannot find the service name.
+// Tier filtering is skipped when outbound clipping by tier is disabled.
 func (d *Driver) resolveHTTPOutboundService(paths []*graph.CallPath, curService grail.Service) ([]*graph.CallPath, int, int, []fty.OutboundPoint) {
 	resolvedPaths := make([]*graph.CallPath, 0, len(paths))
 	totalHTTPPathCount := 0
@@ -1888,9 +1889,10 @@ func (d *Driver) resolveHTTPOutboundService(paths []*graph.CallPath, curService 
 		}
 		if !matchedService {
 			d.Logger.Warnw("Failed to match service name for HTTP outbound path", "path", path)
+			continue
 		}
 		// Tier filtering HTTP outbounds are per-path-based, we need to do tier filtering after the service name resolution.
-		if matchedService && curService.Tier < path.Outbound.Service.Tier {
+		if d.opts.NoOBClipByTier || curService.Tier < path.Outbound.Service.Tier {
 			resolvedPaths = append(resolvedPaths, path)
 		} else {
 			d.Logger.Warnw("HTTP outbound path is not lower than the service tier", "path", path)
