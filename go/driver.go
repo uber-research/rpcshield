@@ -455,6 +455,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		var ssaProg *ssa.Program
 		start = time.Now()
 
+		usedBazelLoader := false
 		if d.opts.PackageSource != nil {
 			var err error
 			pkgs, ssaPkgs, ssaProg, err = d.opts.PackageSource(target)
@@ -479,11 +480,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			d.Logger.Debugw("Packages", "packages", pkgs)
 			result.RunMetrics[_pkgCount] += float64(len(pkgs))
 
-			// Generating SSA packages.
-			repairIllTypedPropagationFromSourcelessPkgs(pkgs)
-			ssaProg, _ = ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
-			ssaPkgs = ssaProg.AllPackages()
-			ssaProg.Build()
+			usedBazelLoader = true
 		} else {
 			goPath, cdeps, err := d.GoPathWrapper.LiftGoPath(d.Runner, target)
 			if err != nil {
@@ -521,21 +518,36 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 			// Force GC to free up memory.
 			runtime.GC()
 
-			// Generating SSA packages.
-			repairIllTypedPropagationFromSourcelessPkgs(pkgs)
-			ssaProg, ssaPkgs = ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
-			// Build the SSA program; needed for getting generics instantiated and funclits resolved.
-			// Also needed for call graph construction.
-			ssaProg.Build()
 		}
 		result.RunMetrics[_pkgLoadingDurationSecs] += time.Now().Sub(start).Seconds()
 
-		// Dump diagnostics.
-		_, packagesWithErrors, _ := d.dumpPackageDiagnostics(pkgs, ssaProg, ssaPkgs)
-		// Stop processing if there are packages with errors
-		if packagesWithErrors != 0 {
+		if d.opts.PackageSource == nil {
+			repairIllTypedPropagationFromSourcelessPkgs(pkgs)
+		}
+
+		// Stop processing if any package failed to load. This runs before SSA construction: the run
+		// is going to abort either way, and building SSA for a large service first costs minutes of
+		// CPU and tens of gigabytes of RAM -- enough that on the biggest services the process was
+		// killed before it ever produced the diagnostic explaining why it could not proceed.
+		if _, packagesWithErrors := d.dumpPackageDiagnostics(pkgs); packagesWithErrors != 0 {
 			return result, fmt.Errorf("%d packages have errors", packagesWithErrors)
 		}
+
+		if d.opts.PackageSource == nil {
+			// Generating SSA packages. Build the SSA program; needed for getting generics instantiated
+			// and funclits resolved. Also needed for call graph construction.
+			start = time.Now()
+			if usedBazelLoader {
+				ssaProg, _ = ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
+				ssaPkgs = ssaProg.AllPackages()
+			} else {
+				ssaProg, ssaPkgs = ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
+			}
+			ssaProg.Build()
+			result.RunMetrics[_pkgLoadingDurationSecs] += time.Now().Sub(start).Seconds()
+		}
+
+		d.Logger.Infow("dumpPackageDiagnostic", "mains", len(d.getMain(ssaProg)))
 
 		d.Logger.Infow("Loaded SSA packages", "num_packages", len(ssaPkgs))
 		d.Logger.Debugw("SSA Packages", "packages", ssaPkgs)
@@ -1652,8 +1664,14 @@ func isSourcelessBuildConstraintPackage(p *packages.Package) bool {
 	return true
 }
 
-// dumpPackageDiagnostics expects 1-1 mapping between packages and ssa packages coming from ssautil.AllPackages.
-func (d *Driver) dumpPackageDiagnostics(pkgs []*packages.Package, ssaProg *ssa.Program, ssaPkgs []*ssa.Package) (int, int, []*ssa.Package) {
+// dumpPackageDiagnostics logs the packages that failed to load and returns how many loaded
+// cleanly and how many did not.
+//
+// A package failed to load exactly when ssautil.AllPackages would not create an SSA package for
+// it, which it decides from `p.Types != nil && !p.IllTyped`. Deciding it here from the same two
+// fields rather than from a nil lookup in the built SSA program lets the caller bail out before
+// paying for SSA construction.
+func (d *Driver) dumpPackageDiagnostics(pkgs []*packages.Package) (int, int) {
 	packagesWithErrors := 0
 	packageWoErrors := 0
 	for _, p := range pkgs {
@@ -1662,7 +1680,7 @@ func (d *Driver) dumpPackageDiagnostics(pkgs []*packages.Package, ssaProg *ssa.P
 			typeInf = len(p.TypesInfo.Types)
 		}
 
-		if ssaProg.Package(p.Types) == nil {
+		if p.Types == nil || p.IllTyped {
 			d.Logger.Infow("dumpPackageDiagnostic", "PkgName", p.Name, "PkgPath", p.PkgPath, "TypeInfoLen", typeInf)
 
 			if isSourcelessBuildConstraintPackage(p) {
@@ -1698,9 +1716,8 @@ func (d *Driver) dumpPackageDiagnostics(pkgs []*packages.Package, ssaProg *ssa.P
 		}
 	}
 	// Find the main packages.
-	mains := d.getMain(ssaProg)
-	d.Logger.Infow("dumpPackageDiagnostic", "packageWoErrors", packageWoErrors, "packagesWithErrors", packagesWithErrors, "mains", len(mains))
-	return packageWoErrors, packagesWithErrors, mains
+	d.Logger.Infow("dumpPackageDiagnostic", "packageWoErrors", packageWoErrors, "packagesWithErrors", packagesWithErrors)
+	return packageWoErrors, packagesWithErrors
 }
 
 // findTargets resolves serviceName to its Bazel targets, using DriverOptions.Targets directly if
