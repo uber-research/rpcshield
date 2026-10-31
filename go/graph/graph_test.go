@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/types"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -166,6 +167,10 @@ var _rpcshieldDemoGoGetPath = [][]string{
 }
 
 func commonSetup(t *testing.T, rta bool) Builder {
+	return commonSetupWithConfig(t, rta, DefaultSerialGraphConfig())
+}
+
+func commonSetupWithConfig(t *testing.T, rta bool, cfg Config) Builder {
 	testPkg := rpcshieldtest.LoadrpcshieldDemoPackages()
 	entryPkg, allPkgs, ssaProg, ssaPkgs := testPkg.Entry, testPkg.All, testPkg.SSAProg, testPkg.SSAPkgs
 	// Produce SSA to AST mapping.
@@ -199,7 +204,7 @@ func commonSetup(t *testing.T, rta bool) Builder {
 	require.NotEmpty(t, outbounds)
 
 	// Now, create a graph builder with CHA.
-	b := NewBuilder(logger, allPkgs, ssaProg, ssaPkgs, SSAASTBidirMap, SigASTBidirMap, isGlue, entryPkg, inbounds, outbounds, rta, DefaultSerialGraphConfig())
+	b := NewBuilder(logger, allPkgs, ssaProg, ssaPkgs, SSAASTBidirMap, SigASTBidirMap, isGlue, entryPkg, inbounds, outbounds, rta, cfg)
 	return b
 }
 
@@ -281,6 +286,30 @@ func TestE2E(t *testing.T) {
 			}
 		}
 		require.Contains(t, _rpcshieldDemoPaths, canonocalPath)
+	}
+	require.NotNil(t, buildResult)
+}
+
+// TestE2EVTA runs the same rpcshielddemo scenario as TestE2E under the VTA flavor.
+// The demo service is wired by fx, so the paths it asserts only exist if VTA's
+// reflection model reconnects dependency-injected values (see rpcshield/vta).
+// The exact-count assertion is the point: it catches both paths VTA drops and
+// noise it adds.
+func TestE2EVTA(t *testing.T) {
+	t.Setenv(_debugFunRegexpEnv, `^\(\*.*rpcshielddemo\.handler\)\.Get$`)
+	b := commonSetupWithConfig(t, true /* rta */, Config{RTAFlavor: FlavorVTA, RTANumWorkers: runtime.GOMAXPROCS(0)})
+	require.NotNil(t, b)
+	paths, buildResult, err := b.Build()
+	require.NoError(t, err)
+	require.Len(t, paths, len(_rpcshieldDemoPaths))
+	for _, path := range paths {
+		canonicalPath := path.Edges[0].Edge.Caller.Func.String()
+		for _, edge := range path.Edges {
+			if edge.Edge.Callee != nil {
+				canonicalPath += edge.Edge.Callee.Func.String()
+			}
+		}
+		require.Contains(t, _rpcshieldDemoPaths, canonicalPath)
 	}
 	require.NotNil(t, buildResult)
 }

@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"regexp"
+
 	"go.uber.org/zap"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/ssa"
@@ -306,6 +308,7 @@ func (g *builderImpl) cleanupNodesInBlockedPkgsOrFiles(cg *callgraph.Graph) {
 			toDelete[node.Func] = struct{}{}
 		}
 	}
+	g.spliceDelegators(cg, toDelete)
 	// Step 1: Iterate over all nodes to update their In and Out edges.
 	for _, node := range cg.Nodes {
 		// Update Out edges
@@ -329,6 +332,146 @@ func (g *builderImpl) cleanupNodesInBlockedPkgsOrFiles(cg *callgraph.Graph) {
 	// Step 2: Delete the nodes
 	for f := range toDelete {
 		delete(cg.Nodes, f)
+	}
+}
+
+// delegatorRegexps compiles Config.DelegatorPackagePatterns once. They identify generated
+// delegator packages: packages blocked from appearing in paths like the rest of the block
+// list, but unlike the rest pure delegators -- a delegator's whole body is a call to the
+// implementation it wraps (generated decorators, interceptors). Deleting one outright
+// therefore severs a real path rather than trimming noise off it.
+//
+// A type-based flavor never exposed this. Its global type pool gives the caller an edge to
+// every implementation of the interface, including a direct one to the wrapped
+// implementation, so the path survived alongside the delegator. A flow-based analysis
+// resolves the call to the delegator alone -- which is what actually runs -- and the
+// direct edge no longer exists to fall back on. Invalid patterns are logged and skipped.
+func (g *builderImpl) delegatorRegexps() []*regexp.Regexp {
+	g.delegatorPkgRegexOnce.Do(func() {
+		for _, pattern := range g.config.DelegatorPackagePatterns {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				g.logger.Errorw("invalid delegator package pattern, skipping", "pattern", pattern, "error", err)
+				continue
+			}
+			g.delegatorPkgRegex = append(g.delegatorPkgRegex, re)
+		}
+	})
+	return g.delegatorPkgRegex
+}
+
+// isDelegatorPkg reports whether pkgPath matches any configured delegator package pattern.
+func (g *builderImpl) isDelegatorPkg(pkgPath string) bool {
+	for _, re := range g.delegatorRegexps() {
+		if re.MatchString(pkgPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// spliceDelegators reconnects the callers of a to-be-deleted delegator to what
+// it delegates to, so that removing the frame shortens the path instead of
+// deleting it. Chains of delegators are followed through to the first callee
+// that survives.
+func (g *builderImpl) spliceDelegators(cg *callgraph.Graph, toDelete map[*ssa.Function]struct{}) {
+	if !g.config.RTAFlavor.isFlowBased() || len(g.delegatorRegexps()) == 0 {
+		// A type-based flavor already has the direct caller-to-implementation
+		// edge, so splicing would add nothing it needs — and it would drag in
+		// every callee the decorator's own imprecise interface calls resolve
+		// to, which is noise the block list is there to remove.
+		return
+	}
+	pkgOf := func(f *ssa.Function) string {
+		if f == nil || f.Pkg == nil || f.Pkg.Pkg == nil {
+			return ""
+		}
+		return f.Pkg.Pkg.Path()
+	}
+	isDelegator := func(f *ssa.Function) bool {
+		if _, ok := toDelete[f]; !ok {
+			return false
+		}
+		return g.isDelegatorPkg(pkgOf(f))
+	}
+
+	// survivors walks past a run of delegators to the callees that remain.
+	//
+	// The walk is confined to the decorator package it started in, and only
+	// callees named for the method being decorated are kept. Both constraints
+	// are needed. A generated decorator method does not simply call its
+	// wrapped implementation: it runs glue's interceptor chain, which dispatches
+	// through a func value that the analysis resolves to the `newWrapper$N`
+	// closure of *every* decorator package in the service. Staying in-package
+	// discards the other services' closures; matching the name picks the right
+	// one of this package's own, since there is one closure per method.
+	var survivors func(n *callgraph.Node, pkg, name string, seen map[*ssa.Function]bool) []*callgraph.Node
+	survivors = func(n *callgraph.Node, pkg, name string, seen map[*ssa.Function]bool) []*callgraph.Node {
+		if seen[n.Func] {
+			return nil
+		}
+		seen[n.Func] = true
+		var out []*callgraph.Node
+		for _, e := range n.Out {
+			if e == nil || e.Callee == nil {
+				continue
+			}
+			if isDelegator(e.Callee.Func) {
+				if pkgOf(e.Callee.Func) == pkg {
+					out = append(out, survivors(e.Callee, pkg, name, seen)...)
+				}
+				continue
+			}
+			if _, dropped := toDelete[e.Callee.Func]; dropped {
+				continue
+			}
+			if e.Callee.Func.Name() != name {
+				continue
+			}
+			out = append(out, e.Callee)
+		}
+		return out
+	}
+
+	// Collect first, add second: AddEdge mutates the Out slices being walked.
+	type splice struct {
+		caller *callgraph.Node
+		site   ssa.CallInstruction
+		callee *callgraph.Node
+	}
+	var splices []splice
+	for _, node := range cg.Nodes {
+		if isDelegator(node.Func) {
+			continue
+		}
+		// Existing edges are recorded so the splice never duplicates one. A
+		// caller can reach the same implementation both directly and through a
+		// decorator, and adding a parallel edge would make path enumeration
+		// report the same path twice.
+		reached := map[*ssa.Function]bool{}
+		for _, e := range node.Out {
+			if e != nil && e.Callee != nil {
+				reached[e.Callee.Func] = true
+			}
+		}
+		for _, e := range node.Out {
+			if e == nil || e.Callee == nil || !isDelegator(e.Callee.Func) {
+				continue
+			}
+			// The delegator's callee is reached from this same call site, so
+			// the site carries over: it is where control leaves the caller.
+			d := e.Callee
+			for _, s := range survivors(d, pkgOf(d.Func), d.Func.Name(), map[*ssa.Function]bool{}) {
+				if reached[s.Func] {
+					continue
+				}
+				reached[s.Func] = true
+				splices = append(splices, splice{node, e.Site, s})
+			}
+		}
+	}
+	for _, s := range splices {
+		callgraph.AddEdge(s.caller, s.site, s.callee)
 	}
 }
 
