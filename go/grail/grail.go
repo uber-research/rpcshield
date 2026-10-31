@@ -29,7 +29,7 @@ const (
 	// GoCodeGitURI is the git URI for the Go monorepo.
 	GoCodeGitURI = "gitolite@example.internal:go-code"
 	// JavaCodeGitURI is the git URI for the Java monorepo.
-	JavaCodeGitURI = "gitolite@example.internal:lm/fievel"
+	JavaCodeGitURI = "gitolite@example.internal:java-code"
 	// OvercommitStr is the string for the overcommit namespace.
 	OvercommitStr = "OVERCOMMIT"
 	// BreakBeforeMakeStr is the string for the break before make burst strategy.

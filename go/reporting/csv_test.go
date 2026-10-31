@@ -188,7 +188,7 @@ func TestCSV_Write(t *testing.T) {
 			t.Parallel()
 
 			service := grail.Service{Name: tc.service, Tier: -1}
-			filename, rowsWritten, err := WriteReportsToCSV(t.TempDir(), service, tc.reports, tc.gitSHA, time.Now().UTC().Format(time.RFC3339), constant.SourceForCSV, "go-code", "")
+			filename, rowsWritten, err := WriteReportsToCSV(t.TempDir(), service, tc.reports, tc.gitSHA, time.Now().UTC().Format(time.RFC3339), constant.SourceForCSV, "example-repo", "")
 
 			// Check for expected errors
 			if tc.expectError {

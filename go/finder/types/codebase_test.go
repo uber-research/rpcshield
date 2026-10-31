@@ -58,8 +58,8 @@ func TestDedupPackages(t *testing.T) {
 	t.Parallel()
 
 	const (
-		fooPath = "code.uber.internal/example/foo"
-		barPath = "code.uber.internal/example/bar"
+		fooPath = "example.internal/example/foo"
+		barPath = "example.internal/example/bar"
 	)
 
 	tests := []struct {
@@ -98,7 +98,7 @@ func TestDedupPackages(t *testing.T) {
 				{ID: "//example/foo:variant_a", PkgPath: fooPath},
 				{ID: "//example/foo:variant_b", PkgPath: fooPath},
 			},
-			wantErr: `duplicate package found: "code.uber.internal/example/foo" (//example/foo:variant_a vs //example/foo:variant_b)`,
+			wantErr: `duplicate package found: "example.internal/example/foo" (//example/foo:variant_a vs //example/foo:variant_b)`,
 		},
 		{
 			name: "two canonical duplicates are a genuine error",
@@ -106,7 +106,7 @@ func TestDedupPackages(t *testing.T) {
 				{ID: "//example/foo:go_default_library", PkgPath: fooPath},
 				{ID: "//other/foo:go_default_library", PkgPath: fooPath},
 			},
-			wantErr: `duplicate package found: "code.uber.internal/example/foo"`,
+			wantErr: `duplicate package found: "example.internal/example/foo"`,
 		},
 		{
 			name: "non-_go_proto variant replaces already-seen _go_proto variant",

@@ -1,5 +1,5 @@
 // Package common holds cmd/rpcshield helpers with no monorepo-internal dependencies.
-// Monorepo-only helpers (USSO auth, LDA telemetry, Buildkite
+// Monorepo-only helpers (SSO auth, telemetry, CI
 // CI signals) live in cmd/rpcshield/uberutil instead.
 package common
 

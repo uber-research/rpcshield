@@ -155,7 +155,7 @@ type DriverOptions struct {
 	// func/interface field it hits, silently dropping every field after it too.
 	BazelLoader func(targetPkgPath string) ([]*packages.Package, error) `json:"-"`
 	// KeepGoPathAfterRun disables the best-effort background cleanup of a lifted GOPATH directory
-	// after a run. Uber's devpod environment sets this since its cache disk is large enough that
+	// after a run. A development environment can set this when its cache disk is large enough that
 	// skipping cleanup is faster for subsequent runs; the OSS default (false) always cleans up.
 	KeepGoPathAfterRun bool
 	// TargetResolver resolves a service name to its Bazel targets. Nil defaults to
@@ -397,7 +397,7 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 
 		// Construct output reports by making the reports more user-friendly.
 		// For example, there could be many path reports between the same inbound-outbound pair
-		// making the column too large for CSV (Kirby upload) and HTML.
+		// making the column too large for CSV and HTML.
 		outputReports := d.processReportsForOutput(reports)
 
 		// Write the reports to CSV file, if enabled.
@@ -894,7 +894,7 @@ func (d *Driver) aggregateReportMetrics(result *Result, reports []output.Report)
 	kindStats := make(map[constant.AnalyzerKind]int)
 	// Collect the total counts of each fail-ness status across call paths for observability purposes.
 	failnessPathStats := make(map[constant.Failness]int)
-	// Collect call path lengths for LDA observability.
+	// Collect call path lengths for metrics reporting.
 	var failCloseSyncPathLengths []CallPathLength
 	var failOpenSyncPathLengths []CallPathLength
 	var failCloseAsyncPathLengths []CallPathLength
@@ -954,7 +954,7 @@ func (d *Driver) aggregateReportMetrics(result *Result, reports []output.Report)
 		result.FailnessMetrics[fmt.Sprintf("%s_path_count", strings.ToLower(string(k)))] += float64(v)
 	}
 
-	// Compute call path length percentile statistics for LDA observability.
+	// Compute call path length percentile statistics for metrics reporting.
 	// percentile returns the value at the given percentile (0-100) from a sorted slice using nearest-rank.
 	percentile := func(sorted []int, p int) float64 {
 		n := len(sorted)
