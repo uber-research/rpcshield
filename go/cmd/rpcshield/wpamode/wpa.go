@@ -170,7 +170,7 @@ type Options struct {
 	GenAIOrgID          string
 	// BazelLoader, when set, is passed straight through to rpcshield.DriverOptions.BazelLoader --
 	// see that field's doc for details. Nil (the OSS default) disables the fast path.
-	BazelLoader func(targetPkgPath string) ([]*packages.Package, error) `json:"-"`
+	BazelLoader func(targetPkgPath string, additionalLabels []string) ([]*packages.Package, error) `json:"-"`
 	// KeepGoPathAfterRun is passed straight through to rpcshield.DriverOptions.KeepGoPathAfterRun.
 	KeepGoPathAfterRun bool
 	// ServiceRegistryProvider supplies the service list and outbound-client-type-to-service

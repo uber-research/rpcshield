@@ -153,7 +153,13 @@ type DriverOptions struct {
 	// json:"-" since encoding/json can't marshal a func -- and would otherwise abort marshaling
 	// this whole struct (used for the "Running rpcshield driver" options log line) at the first
 	// func/interface field it hits, silently dropping every field after it too.
-	BazelLoader func(targetPkgPath string) ([]*packages.Package, error) `json:"-"`
+	//
+	// The driver calls it up to twice per target: first with no additionalLabels, then -- when
+	// Bazel's real dependency graph (see queryTargetDependencyClosure) names importpath-bearing
+	// targets the first load did not materialize -- again with exactly those labels, which the
+	// loader must add to the set of packages it materializes. The returned roots are then bounded
+	// to the target's real dependency closure, so a loader may return more than was asked for.
+	BazelLoader func(targetPkgPath string, additionalLabels []string) ([]*packages.Package, error) `json:"-"`
 	// KeepGoPathAfterRun disables the best-effort background cleanup of a lifted GOPATH directory
 	// after a run. Uber's devpod environment sets this since its cache disk is large enough that
 	// skipping cleanup is faster for subsequent runs; the OSS default (false) always cleans up.
@@ -445,9 +451,10 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		// Resolve the import path of the code actually compiled into target once, up front:
 		// for go_binary(embed=[":lib"]) targets whose embedded library lives in another
 		// directory, the directory-derived guess is wrong (see resolveTargetImportPath).
+		bazelPath := filepath.Join(d.WorkspaceRoot, "bin", "bazel")
 		targetPkgPath := dirBasedImportPath(target)
 		if d.opts.PackageSource == nil {
-			targetPkgPath = resolveTargetImportPath(d.Runner, d.Logger, filepath.Join(d.WorkspaceRoot, "bin", "bazel"), target)
+			targetPkgPath = resolveTargetImportPath(d.Runner, d.Logger, bazelPath, target)
 		}
 		d.Logger.Info("target", tidx, " : ", target)
 
@@ -468,15 +475,66 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		} else if d.opts.BazelLoader != nil && useBazelLoader(serviceName, d.opts.Config.BazelLoaderServices, d.opts.ForceLoaderMode) {
 			d.Logger.Infow("Using bazel loader")
 			d.Logger.Infow("Loading packages", "target_pkg_path", targetPkgPath)
-			bkpkgs, err := d.opts.BazelLoader(targetPkgPath)
-
-			pkgs = make([]*packages.Package, 0, len(bkpkgs))
-			packages.Visit(bkpkgs, nil, func(pkg *packages.Package) {
-				pkgs = append(pkgs, pkg)
-			})
+			bkpkgs, err := d.opts.BazelLoader(targetPkgPath, nil)
 			if err != nil {
 				return result, fmt.Errorf("load all packages under %q: %w", targetPkgPath, err)
 			}
+
+			// A Bazel-query-based loader typically matches importpath with an unanchored
+			// regexp, so a sibling package whose importpath merely contains targetPkgPath as
+			// a substring (e.g. a nested subdirectory target) can spuriously come back as an
+			// extra root alongside the intended one. Restrict the roots handed to
+			// packages.Visit to exactly the requested target, so only its real import closure
+			// is walked.
+			bkpkgs = filterExactRoots(bkpkgs, map[string]bool{targetPkgPath: true})
+
+			gotPkgPaths := make(map[string]bool, len(bkpkgs))
+			packages.Visit(bkpkgs, nil, func(pkg *packages.Package) {
+				gotPkgPaths[pkg.PkgPath] = true
+			})
+
+			// Custom Starlark rules can merge in dependencies via attributes an aspect-based
+			// loader does not walk, so real Bazel dependencies can be invisible to the load
+			// above. Rather than maintaining a curated list of known gaps, ask Bazel's real
+			// dependency graph which importpath-bearing targets this target actually depends
+			// on, and reload with exactly the ones missing from the first result.
+			closure, err := queryTargetDependencyClosure(d.Runner, bazelPath, target)
+			if err != nil {
+				return result, fmt.Errorf("determine additional labels for %q: %w", target, err)
+			}
+			allowedPkgPaths := map[string]bool{targetPkgPath: true}
+			var additionalLabels []string
+			for importPath := range closure.ImportPaths {
+				allowedPkgPaths[importPath] = true
+				if !gotPkgPaths[importPath] {
+					additionalLabels = append(additionalLabels, closure.Labels[importPath])
+				}
+			}
+			if len(additionalLabels) > 0 {
+				slices.Sort(additionalLabels)
+				d.Logger.Infow("Reloading with dynamically discovered additional labels", "target_pkg_path", targetPkgPath, "additional_labels", additionalLabels)
+				bkpkgs, err = d.opts.BazelLoader(targetPkgPath, additionalLabels)
+				if err != nil {
+					return result, fmt.Errorf("load all packages under %q with additional labels: %w", targetPkgPath, err)
+				}
+				bkpkgs = filterExactRoots(bkpkgs, allowedPkgPaths)
+			}
+
+			// Bound the final package graph to target's real (bazel query ground-truth)
+			// same-configuration dependency closure, not just its roots: an additional-labels
+			// reload adds whichever whole label was named, and packages.Visit then walks that
+			// label's own package graph via its Imports map, which can itself reach further
+			// than target's real import graph does -- e.g. a custom rule's own build-time
+			// codegen-tool attribute (cfg = "host") leaking its tool's entire closure once the
+			// rule's generated-sources label is pulled in. filterExactRoots alone cannot catch
+			// this, since it only gates which packages count as roots, not what is reachable
+			// from them.
+			pkgs = make([]*packages.Package, 0, len(bkpkgs))
+			packages.Visit(bkpkgs, nil, func(pkg *packages.Package) {
+				if allowedPkgPaths[pkg.PkgPath] {
+					pkgs = append(pkgs, pkg)
+				}
+			})
 			d.Logger.Infow("Loaded packages", "num_packages", len(pkgs))
 			d.Logger.Debugw("Packages", "packages", pkgs)
 			result.RunMetrics[_pkgCount] += float64(len(pkgs))
@@ -1964,6 +2022,127 @@ func getMaxUsedDram() (int64, error) {
 // directory; see resolveTargetImportPath for the embed-in-another-directory case.
 func dirBasedImportPath(target string) string {
 	return strings.Split(strings.TrimPrefix(target, "//src/"), ":")[0]
+}
+
+// filterExactRoots restricts bkpkgs to the packages whose PkgPath is in allowedPkgPaths. It guards
+// against a Bazel-query-based loader's unanchored importpath match spuriously returning sibling
+// packages whose importpath merely contains the requested one as a substring (e.g. a nested
+// subdirectory target) as extra roots. If no package matches exactly, bkpkgs is returned
+// unfiltered rather than dropping every root.
+func filterExactRoots(bkpkgs []*packages.Package, allowedPkgPaths map[string]bool) []*packages.Package {
+	roots := make([]*packages.Package, 0, len(bkpkgs))
+	for _, pkg := range bkpkgs {
+		if allowedPkgPaths[pkg.PkgPath] {
+			roots = append(roots, pkg)
+		}
+	}
+	if len(roots) == 0 {
+		return bkpkgs
+	}
+	return roots
+}
+
+// targetDependencyClosure is target's real (bazel query ground-truth) same-configuration
+// transitive dependency closure: every importpath-bearing target Bazel's own build graph says
+// target actually depends on, in its own build configuration. See
+// queryTargetDependencyClosure for how it is computed and why it is trustworthy as both a gap
+// detector and a final allowlist for the packages loaded for target.
+type targetDependencyClosure struct {
+	// ImportPaths is the complete set of same-configuration import paths in target's real
+	// dependency closure.
+	ImportPaths map[string]bool
+	// Labels maps each import path to its originating Bazel label, suitable for a
+	// BazelLoader's additional labels.
+	Labels map[string]string
+}
+
+// queryTargetDependencyClosure returns target's real transitive Bazel dependency closure,
+// restricted to targets that declare a non-empty importpath attribute (i.e. are real
+// Go-importable packages, regardless of which rule -- standard or custom -- defines them) and
+// share target's own build configuration. bazel query's deps() walks every real dependency edge
+// regardless of attribute name, so this closure is ground truth for target's real Go source
+// import graph, independent of whatever query strategy the configured BazelLoader used to
+// materialize packages. It serves two purposes at the call site: diffed against the loaded
+// package set, it dynamically finds loader gaps (custom rules that merge deps via attributes
+// outside an aspect's walk list) for any rule kind, present or future, with no maintained label
+// list; used whole, it is a final allowlist that bounds the loaded package graph to target's real
+// Go source import graph.
+//
+// deps() also walks edges into build-time tool dependencies (codegen plugins, static-analysis
+// checkers, a custom rule's own codegen compiler declared with cfg = "host"/"exec") that Bazel
+// resolves in a separate configuration. These can themselves have an importpath but are not part
+// of the target's own Go source import graph. Rather than excluding them by rule kind or attribute
+// name, this filters by Bazel's own configuration model: only cquery results whose resolved
+// configuration checksum matches target's own configuration are real target-configuration
+// dependencies.
+//
+// This deliberately does not pass --noimplicit_deps: Bazel classifies dependencies injected by a
+// custom rule's own implementation as "implicit" too, so that flag would strip out exactly the
+// loader gaps this function exists to find.
+//
+// rules_go's own support libraries (test harness, coverage runtime) share the target's
+// configuration too, and some transitively fail to load for any service. They are declared with
+// rules_go's "go_tool_library" rule kind, reserved for the toolchain's internal bootstrap
+// libraries, so filtering on that kind stays structural rather than a per-service list.
+func queryTargetDependencyClosure(runner utils.Runner, bazelPath, target string) (*targetDependencyClosure, error) {
+	targetConfig, err := queryConfigurationChecksum(runner, bazelPath, target)
+	if err != nil {
+		return nil, fmt.Errorf("determine configuration for %q: %w", target, err)
+	}
+
+	out, _, err := utils.ExecCommand(runner, bazelPath, "cquery", "--bes_backend=", "--output=jsonproto",
+		fmt.Sprintf(`attr(importpath, '.+', deps(%s))`, target))
+	if err != nil {
+		return nil, fmt.Errorf("cquery importpath-bearing deps for %q: %w", target, err)
+	}
+	var resp bazel.CqueryResponse
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse cquery response for %q: %w", target, err)
+	}
+	closure := &targetDependencyClosure{
+		ImportPaths: make(map[string]bool),
+		Labels:      make(map[string]string),
+	}
+	for _, res := range resp.Results {
+		if res.Configuration.Checksum != targetConfig {
+			continue
+		}
+		rule := res.Target.Rule
+		if rule.RuleClass == "go_tool_library" {
+			continue
+		}
+		var importPath string
+		for _, attr := range rule.Attributes {
+			if attr.Name == "importpath" {
+				importPath = attr.StringValue
+				break
+			}
+		}
+		if importPath == "" {
+			continue
+		}
+		closure.ImportPaths[importPath] = true
+		closure.Labels[importPath] = rule.Name
+	}
+	return closure, nil
+}
+
+// queryConfigurationChecksum returns the build configuration checksum Bazel resolves target
+// under, used to distinguish target-configuration dependencies from exec/host-configured build
+// tools in queryTargetDependencyClosure.
+func queryConfigurationChecksum(runner utils.Runner, bazelPath, target string) (string, error) {
+	out, _, err := utils.ExecCommand(runner, bazelPath, "cquery", "--bes_backend=", "--output=jsonproto", target)
+	if err != nil {
+		return "", fmt.Errorf("cquery configuration for %q: %w", target, err)
+	}
+	var resp bazel.CqueryResponse
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", fmt.Errorf("parse cquery response for %q: %w", target, err)
+	}
+	if len(resp.Results) == 0 {
+		return "", fmt.Errorf("cquery for %q returned no results", target)
+	}
+	return resp.Results[0].Configuration.Checksum, nil
 }
 
 // resolveTargetImportPath returns the Go import path of the source code compiled into target.
