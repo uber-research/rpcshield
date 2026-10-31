@@ -158,7 +158,7 @@ below.
 
 ## Gotchas
 
-- **Monorepo `go` wrapper.** Same as `../rta/evaluation_scripts`: `/home/user/go-code/bin/go`
+- **Monorepo `go` wrapper.** Same as `../rta/evaluation_scripts`: `<workspace>/bin/go`
   hardcodes `GO111MODULE=off`, which breaks `packages.Load` against OSS checkouts. Both
   `clone_datasets.sh` and `run_oss_pipeline_sweep.sh`/`check_fixture.sh` prepend `$(go env
   GOROOT)/bin` to `PATH` and set `GO111MODULE=on`. Do the same in your shell before invoking the

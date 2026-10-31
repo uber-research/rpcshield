@@ -1294,7 +1294,7 @@ func TestDriver_AggregateReportMetrics(t *testing.T) {
 
 			d.aggregateReportMetrics(result, tt.reports)
 
-			// One LDA row per edge, never more.
+			// One metrics row per edge, never more.
 			assert.Len(t, result.AnalyzerMetrics, tt.wantAnalyzerMetricRows)
 			for name, want := range tt.wantAnalyzerCounts {
 				assert.Equal(t, want, int(result.RunMetrics[name]), "run metric %q", name)

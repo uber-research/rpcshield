@@ -1601,7 +1601,7 @@ func (a *analyzer) evalCall(call *ssa.Call) valState {
 		// Error constructors that always produce a non-nil error regardless of
 		// the nilness of their error parameter. The wrap-like join above would
 		// incorrectly conclude nil-in → nil-out for these.
-		// TODO(PROGSYS-3757): replace this hardcoded list with a generalized
+		// TODO: replace this hardcoded list with a generalized
 		// constructor-vs-wrapper detection (e.g. inspect the body to see whether
 		// the error param is returned through any path, or use a curated registry
 		// of known error constructors).

@@ -746,9 +746,8 @@ func findKafkaHandler(currentService grail.Service, allPkgs []*packages.Package,
 	// Now find all implementations of this type in the service codebase.
 	var inboundPoints []fty.InboundPoint
 	for _, pkg := range allPkgs {
-		// restrict to codebase packages. It avoids duplicates like this:
-		// Found Kafka handler in Defs	{"func": "ProcessCustomerChange", "pos": "/home/user/.cache/bazel/_bazel_milind/b97476d719d716accead0f2d5b93104f/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.internal/crack/luna-gateway/luna-gateway-anal/src/example.internal/crack/luna-gateway/handler/kcp/kafka.go:46:19"}
-		// duplicate in glue: Found Kafka handler in Defs	{"func": "ProcessCustomerChange", "pos": "/home/user/.cache/bazel/_bazel_milind/b97476d719d716accead0f2d5b93104f/execroot/__main__/bazel-out/k8-fastbuild/bin/src/example.internal/crack/luna-gateway/luna-gateway-anal/src/glue/decorator/example.internal/crack/luna-gateway/handler/kcp/glue_handler.go:177:25"}
+		// restrict to codebase packages. It avoids counting the same handler twice when a
+		// generated (glue) package re-exports a Def from the codebase package that owns it.
 		if !strings.HasPrefix(pkg.PkgPath, codebasePkgPrefix) {
 			continue
 		}

@@ -2,7 +2,7 @@ workspace(name = "rpcshield")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-# Same version as the go-code monorepo (src/example.internal/infra/progsys/rpcshield), so
+# Same version as the upstream monorepo (src/example.internal/infra/progsys/rpcshield), so
 # packages migrated out of the monorepo build identically here.
 http_archive(
     name = "io_bazel_rules_go",
@@ -23,7 +23,7 @@ http_archive(
 )
 
 # Needed transitively by go.uber.org/yarpc's protobuf encoding (via
-# com_github_gogo_googleapis's BUILD file). Same versions as the go-code monorepo -- declared
+# com_github_gogo_googleapis's BUILD file). Same versions as the upstream monorepo -- declared
 # here, before go_rules_dependencies()/gazelle_dependencies(), so this version wins over
 # whatever older bazel_skylib those would otherwise register first (com_google_protobuf's
 # proto_library rule needs paths.is_normalized, added in a newer skylib).

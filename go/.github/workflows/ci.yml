@@ -7,7 +7,7 @@ on:
 
 # WORKSPACE/.bazelrc/third_party/repos.bzl only use public sources (github.com, proxy.golang.org,
 # mirror.bazel.build) -- this is a small, self-contained Bazel workspace (unlike Uber's internal
-# go-code monorepo, which this repo was ported out of), so a real `bazel build //...`/
+# upstream monorepo, which this repo was ported out of), so a real `bazel build //...`/
 # `bazel test //...` here is the intended full build, not an oversized/dangerous one.
 #
 # pipeline_evaluation_scripts/datasets/ (cloned OSS repos used by the sweep harness) is gitignored

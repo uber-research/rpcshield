@@ -76,7 +76,7 @@ func unwrapFuncObj(f *ssa.Function) *types.Func {
 //	Signature must contain at least http.ResponseWriter and *http.Request parameters, in any order
 //
 // This is useful for flagging handlers that take in additional parameters, like
-// a context (which is quite common in go-code).
+// a context (which is quite common in large codebases).
 func isHTTPHandlerFuncSignatureRelaxed(sig *types.Signature) bool {
 	params := sig.Params()
 	if params.Len() < 2 {

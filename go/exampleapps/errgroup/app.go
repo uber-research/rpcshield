@@ -8,8 +8,8 @@ import (
 	ce "github.com/uber-research/rpcshield/go/features/errgroup/ce"
 	ls "github.com/uber-research/rpcshield/go/features/errgroup/locationstore"
 	op "github.com/uber-research/rpcshield/go/features/errgroup/orderplatform"
-	statsdex "github.com/uber-research/rpcshield/go/features/errgroup/statsdex"
 	throttledEG "github.com/uber-research/rpcshield/go/features/errgroup/throttled"
+	timedgroup "github.com/uber-research/rpcshield/go/features/errgroup/timedgroup"
 	tpp "github.com/uber-research/rpcshield/go/features/errgroup/tpp"
 	u4beg "github.com/uber-research/rpcshield/go/features/errgroup/u4b"
 	"github.com/uber-research/rpcshield/go/features/errgroup/workgroup"
@@ -269,9 +269,9 @@ func AUniqueNameU4BEG() {
 	eg.Wait()
 }
 
-// AUniqueNameStatsdex is a function.
-func AUniqueNameStatsdex() {
-	var eg statsdex.WorkGroup
+// AUniqueNameTimedGroup is a function.
+func AUniqueNameTimedGroup() {
+	var eg timedgroup.WorkGroup
 	eg.Go(func() error {
 		return nil
 	}, func(_ bool) {}, time.Second*10)
@@ -324,8 +324,8 @@ func main() {
 	AUniqueNameTPPSafeErrGroup()
 	// U4BEG: a PanicSafeErrGroup{Go,Wait} wrapper over golang.org/x/sync/errgroup
 	AUniqueNameU4BEG()
-	// Statsdex: a hand-rolled WorkGroup{Go,Wait,AnyTimedOut} (no errgroup dependency)
-	AUniqueNameStatsdex()
+	// TimedGroup: a hand-rolled WorkGroup{Go,Wait,AnyTimedOut} (no errgroup dependency)
+	AUniqueNameTimedGroup()
 	// NOt supported: LocationStore has WaitContext/AllErrors methods outside the enricher's
 	// allowed method set, so it is intentionally not detected as errgroup-like.
 	AUniqueNameLocationStore()

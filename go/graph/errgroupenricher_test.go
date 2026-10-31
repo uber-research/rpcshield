@@ -114,7 +114,7 @@ func TestEGEnrich(t *testing.T) {
 				waitCalls: 1,
 			},
 		},
-		"AUniqueNameStatsdex": {
+		"AUniqueNameTimedGroup": {
 			"v1": callInfo{
 				goCalls:   1,
 				waitCalls: 1,

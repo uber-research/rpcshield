@@ -7,6 +7,6 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "go_default_library",
     srcs = ["workgroup.go"],
-    importpath = "github.com/uber-research/rpcshield/go/features/errgroup/statsdex",
+    importpath = "github.com/uber-research/rpcshield/go/features/errgroup/timedgroup",
     visibility = ["//visibility:public"],
 )

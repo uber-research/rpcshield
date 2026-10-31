@@ -146,7 +146,7 @@ parsers can ingest both monorepo and OSS sweeps.
 
 ## Gotchas
 
-- **Monorepo `go` wrapper.** `/home/user/go-code/bin/go` (the wrapper on
+- **Monorepo `go` wrapper.** `<workspace>/bin/go` (the wrapper on
   `$PATH` inside this checkout) hardcodes `GO111MODULE=off` and sources a
   per-project `tools/common/env.sh`, which breaks `packages.Load` against
   OSS checkouts (the loader silently treats the target as a GOPATH-mode

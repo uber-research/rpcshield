@@ -149,12 +149,12 @@
                 <tbody>
                     <tr>
                         <td>
-                            <strong>Service Name:</strong> <a href="https://up.uberinternal.com/s/{{$report.Inbound.Service.Name}}" target="_blank">{{$report.Inbound.Service.Name}}</a><br>
+                            <strong>Service Name:</strong> {{$report.Inbound.Service.Name}}<br>
                             <strong>Service Tier:</strong> {{$report.Inbound.Service.Tier}}<br>
                             <strong>API Name:</strong> {{$report.Inbound.APIName}}
                         </td>
                         <td>
-                            <strong>Service Name:</strong> <a href="https://up.uberinternal.com/s/{{$report.Outbound.Service.Name}}" target="_blank">{{$report.Outbound.Service.Name}}</a><br>
+                            <strong>Service Name:</strong> {{$report.Outbound.Service.Name}}<br>
                             <strong>Service Tier:</strong> {{$report.Outbound.Service.Tier}}<br>
                             <strong>API Name:</strong> {{$report.Outbound.APIName}}<br>
                             <strong>Has Overcommit:</strong> {{$report.Outbound.Service.HasOvercommit}}<br>

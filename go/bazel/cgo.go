@@ -23,7 +23,7 @@ import (
 //      "rule": {
 //        "name": "@icu4c//:icu4c",
 //        "ruleClass": "cc_library",
-//        "location": "/home/user/.cache/bazel/_bazel_smahajan/b97476d719d716accead0f2d5b93104f/external/icu4c/BUILD.bazel:269:11",
+//        "location": "/path/to/bazel/cache/external/icu4c/BUILD.bazel:269:11",
 //        "attribute": [
 //          ...
 //          {

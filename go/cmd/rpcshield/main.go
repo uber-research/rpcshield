@@ -1,6 +1,6 @@
 // Command rpcshield is the thin OSS entrypoint wiring the wpa and json sub-commands. The Uber
 // monorepo's fuller cmd/rpcshield/main.go additionally wires audit/idl-map/diff/shard/etc. modes
-// and Uber-specific plugins (USSO token fetching, LDA metrics reporting, Bazel-query package
+// and codebase-specific plugins (SSO token fetching, metrics reporting, Bazel-query package
 // loading) into wpamode.Options -- see that file for the fuller reference implementation.
 package main
 

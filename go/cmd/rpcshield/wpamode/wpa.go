@@ -40,7 +40,7 @@ type Options struct {
 	LogLevel zapcore.Level
 	// Report indicates whether the rpcshield's findings are reported.
 	Report bool
-	// ReportMetrics indicates whether the metrics are reported via LDA.
+	// ReportMetrics indicates whether the metrics are reported through ReportResult.
 	ReportMetrics bool
 	// CachedGrailAllServicesJSON is the path to the cached grail response for all services JSON file.
 	// It is mainly used in CI to avoid querying grail services over and over again since the
@@ -65,7 +65,7 @@ type Options struct {
 	FetchUSSOToken func(host string, logger *zap.SugaredLogger) (string, error) `json:"-"`
 	// ReportResult reports a named set of metrics/values, called only when ReportMetrics is set.
 	// Nil (the OSS default) makes ReportMetrics a no-op, since reporting typically targets a
-	// Uber-internal LDA telemetry endpoint.
+	// telemetry endpoint of the embedding codebase.
 	ReportResult func(toolname string, values map[string]string, logger *zap.SugaredLogger) error `json:"-"`
 	// CachedKeepIBPkgsJSON is the path to the cached keep packages JSON file.
 	CachedKeepIBPkgsJSON common.CacheOption
@@ -417,7 +417,7 @@ func Run(options Options) (rpcshield.Result, error) {
 		logger.Warnw("ReportMetrics is set but no ReportResult configured, skipping reporting")
 	}
 	if options.ReportMetrics && options.ReportResult != nil {
-		logger.Infow("reporting result via LDA", "service", options.Service)
+		logger.Infow("reporting result", "service", options.Service)
 		// Add additional meta metrics of the run to the result metrics.
 		values := map[string]string{
 			"datestr":        options.Timestamp,
@@ -448,13 +448,13 @@ func Run(options Options) (rpcshield.Result, error) {
 		} else {
 			reportErr := options.ReportResult("rpcshield", values, logger)
 			err = errors.Join(err, reportErr)
-			// Report analyzer results via LDA.
+			// Report analyzer results.
 			for _, m := range result.AnalyzerMetrics {
 				reportErr = options.ReportResult("rpcshield-analyzers", m, logger)
 				err = errors.Join(err, reportErr)
 			}
 
-			// Report inbound-outbound results via LDA.
+			// Report inbound-outbound results.
 			base := map[string]string{"run_timestamp": options.Timestamp, "analyzed_service": options.Service}
 			for _, m := range result.Inbounds {
 				ibValues := maps.Clone(base)

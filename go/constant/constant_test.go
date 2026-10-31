@@ -162,13 +162,13 @@ func TestBuildTBFileURL(t *testing.T) {
 
 	const tmpl = "https://terrablob-gateway.example.com/prod/progsys/rpcshield/{repo}/{service_name}/{timestamp}/"
 
-	got := BuildTBFileURL(tmpl, "go-code", "ads-gateway", "2025-04-10T00:02:57Z")
-	want := "https://terrablob-gateway.example.com/prod/progsys/rpcshield/go-code/ads-gateway/2025-04-10T00%3A02%3A57Z/"
+	got := BuildTBFileURL(tmpl, "example-repo", "ads-gateway", "2025-04-10T00:02:57Z")
+	want := "https://terrablob-gateway.example.com/prod/progsys/rpcshield/example-repo/ads-gateway/2025-04-10T00%3A02%3A57Z/"
 	require.Equal(t, want, got)
 }
 
 func TestBuildTBFileURL_EmptyTemplateDisabled(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "", BuildTBFileURL("", "go-code", "ads-gateway", "2025-04-10T00:02:57Z"))
+	require.Equal(t, "", BuildTBFileURL("", "example-repo", "ads-gateway", "2025-04-10T00:02:57Z"))
 }

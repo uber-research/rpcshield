@@ -22,7 +22,7 @@ var header = []string{
 	"id",                             // unique identifier for the report
 	"run_timestamp",                  // timestamp when rpcshield was run.
 	"source",                         // source generating the report (e.g., go_static, java_dynamic, java_static etc.)
-	"repo",                           // repository name (e.g., go-code, java-code etc.)
+	"repo",                           // repository name (e.g. the name of the analyzed repository)
 	"gitsha",                         // git SHA of the commit that the report is generated for
 	"inbound_service",                // inbound service name
 	"inbound_service_tier",           // inbound service tier

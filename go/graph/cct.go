@@ -232,7 +232,7 @@ func (b *builderImpl) buildCallTree(graph *callgraph.Graph) (map[*ssa.Function]*
 		}
 	}
 
-	// Store config values in b.metrics for LDA reporting
+	// Store config values in b.metrics for metrics reporting
 	b.metrics["exploration_permutation_threshold"] = float64(expCfg.PermutationThreshold)
 	b.metrics["exploration_min_core_size"] = float64(expCfg.MinCoreSize)
 	b.metrics["exploration_max_function_visits"] = float64(expCfg.MaxFunctionVisits)

@@ -388,7 +388,7 @@ func (b *builderImpl) discoverAllErrgroupTypes(prog *ssa.Program) (map[*types.Na
 		"SetLimit":      struct{}{},
 		"Limit":         struct{}{},
 		"FireAndForget": struct{}{},
-		"AnyTimedOut":   struct{}{}, // needed by example.internal/infra/statsdex/pkg/x/sync
+		"AnyTimedOut":   struct{}{}, // hand-rolled WorkGroup variants expose a timeout flag
 	}
 	errGroupTypes := make(map[*types.Named]struct{})
 	errGroupPkgs := make(map[string]struct{})
