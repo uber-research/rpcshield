@@ -1309,3 +1309,69 @@ func TestDriver_AggregateReportMetrics(t *testing.T) {
 		})
 	}
 }
+
+func TestFilterExactRoots(t *testing.T) {
+	a := &packages.Package{PkgPath: "example.com/svc"}
+	b := &packages.Package{PkgPath: "example.com/svc/subdir"}
+	c := &packages.Package{PkgPath: "example.com/other"}
+
+	t.Run("keeps only allowed roots", func(t *testing.T) {
+		got := filterExactRoots([]*packages.Package{a, b, c}, map[string]bool{"example.com/svc": true, "example.com/other": true})
+		assert.Equal(t, []*packages.Package{a, c}, got)
+	})
+	t.Run("returns input unfiltered when nothing matches", func(t *testing.T) {
+		got := filterExactRoots([]*packages.Package{a, b}, map[string]bool{"example.com/missing": true})
+		assert.Equal(t, []*packages.Package{a, b}, got)
+	})
+}
+
+func TestQueryTargetDependencyClosure(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	runner := utilsmock.NewMockRunner(ctrl)
+
+	const target = "//svc:svc"
+	targetCfg := `{"results":[{"target":{"type":"RULE","rule":{"name":"//svc:svc","ruleClass":"go_binary"}},"configuration":{"checksum":"target-cfg"}}]}`
+	depsCfg := `{"results":[
+	  {"target":{"type":"RULE","rule":{"name":"//svc:svc","ruleClass":"go_binary","attribute":[{"name":"importpath","stringValue":"example.com/svc"}]}},"configuration":{"checksum":"target-cfg"}},
+	  {"target":{"type":"RULE","rule":{"name":"//lib:go_default_library","ruleClass":"go_library","attribute":[{"name":"importpath","stringValue":"example.com/lib"}]}},"configuration":{"checksum":"target-cfg"}},
+	  {"target":{"type":"RULE","rule":{"name":"//gen:custom_codegen","ruleClass":"my_custom_rule","attribute":[{"name":"importpath","stringValue":"example.com/gen"}]}},"configuration":{"checksum":"target-cfg"}},
+	  {"target":{"type":"RULE","rule":{"name":"//tools:plugin","ruleClass":"go_binary","attribute":[{"name":"importpath","stringValue":"example.com/tools/plugin"}]}},"configuration":{"checksum":"exec-cfg"}},
+	  {"target":{"type":"RULE","rule":{"name":"@io_bazel_rules_go//go/tools/bzltestutil:bzltestutil","ruleClass":"go_tool_library","attribute":[{"name":"importpath","stringValue":"github.com/bazelbuild/rules_go/go/tools/bzltestutil"}]}},"configuration":{"checksum":"target-cfg"}},
+	  {"target":{"type":"RULE","rule":{"name":"//data:files","ruleClass":"filegroup"}},"configuration":{"checksum":"target-cfg"}}
+	]}`
+	gomock.InOrder(
+		runner.EXPECT().Run(gomock.Any()).DoAndReturn(func(cmd *exec.Cmd) error {
+			require.Equal(t, []string{"bazel", "cquery", "--bes_backend=", "--output=jsonproto", target}, cmd.Args)
+			_, err := cmd.Stdout.Write([]byte(targetCfg))
+			return err
+		}),
+		runner.EXPECT().Run(gomock.Any()).DoAndReturn(func(cmd *exec.Cmd) error {
+			require.Equal(t, []string{"bazel", "cquery", "--bes_backend=", "--output=jsonproto", `attr(importpath, '.+', deps(//svc:svc))`}, cmd.Args)
+			_, err := cmd.Stdout.Write([]byte(depsCfg))
+			return err
+		}),
+	)
+
+	closure, err := queryTargetDependencyClosure(runner, "bazel", target)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{
+		"example.com/svc": true,
+		"example.com/lib": true,
+		"example.com/gen": true,
+	}, closure.ImportPaths, "exec-configured tools, go_tool_library and importpath-less targets are excluded")
+	assert.Equal(t, "//gen:custom_codegen", closure.Labels["example.com/gen"], "custom rule kinds are kept by importpath, not by rule class")
+}
+
+func TestQueryTargetDependencyClosure_NoConfiguration(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	runner := utilsmock.NewMockRunner(ctrl)
+	runner.EXPECT().Run(gomock.Any()).DoAndReturn(func(cmd *exec.Cmd) error {
+		_, err := cmd.Stdout.Write([]byte(`{"results":[]}`))
+		return err
+	})
+	_, err := queryTargetDependencyClosure(runner, "bazel", "//svc:svc")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "returned no results")
+}

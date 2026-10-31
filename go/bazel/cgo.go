@@ -45,7 +45,14 @@ type CqueryResponse struct {
 
 // Result contains the target information.
 type Result struct {
-	Target Target `json:"target"`
+	Target        Target        `json:"target"`
+	Configuration Configuration `json:"configuration"`
+}
+
+// Configuration identifies the build configuration (target vs. exec/host) a cquery result was
+// resolved under.
+type Configuration struct {
+	Checksum string `json:"checksum"`
 }
 
 // Target contains the rule information.
