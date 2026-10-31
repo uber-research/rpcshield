@@ -25,6 +25,8 @@ import (
 	"github.com/uber-research/rpcshield/go/rta/srta_kumo"
 	"github.com/uber-research/rpcshield/go/rta/srta_opt"
 	"github.com/uber-research/rpcshield/go/rta/srta_struct"
+	"github.com/uber-research/rpcshield/go/rta/vta"
+	vtacore "github.com/uber-research/rpcshield/go/vta"
 	"go.uber.org/zap"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
@@ -79,6 +81,15 @@ const (
 	FlavorStdlib
 	// FlavorCHA is the Class Hierarchy Analysis implementation.
 	FlavorCHA
+	// FlavorVTA is Variable Type Analysis, seeded by prta_kumo_nonblocking.
+	// Unlike the RTA flavors it is flow-based, so it resolves an interface
+	// call only to implementations that reach that receiver.
+	FlavorVTA
+	// FlavorVTAStrict is FlavorVTA with the seed fallback disabled. It may
+	// have false negatives where reflection is involved and exists to
+	// measure how much of VTA's edge reduction is genuine precision rather
+	// than the soundness fallback. Not for production use.
+	FlavorVTAStrict
 )
 
 // AllFlavors contains all known RTA flavors.
@@ -94,6 +105,8 @@ var AllFlavors = []RTAFlavor{
 	FlavorPRTAKumoNonblocking,
 	FlavorStdlib,
 	FlavorCHA,
+	FlavorVTA,
+	FlavorVTAStrict,
 }
 
 var flavorNames = [...]string{
@@ -108,6 +121,8 @@ var flavorNames = [...]string{
 	FlavorPRTAKumoNonblocking: "prta_kumo_nonblocking",
 	FlavorStdlib:              "stdlib",
 	FlavorCHA:                 "cha",
+	FlavorVTA:                 "vta",
+	FlavorVTAStrict:           "vta_strict",
 }
 
 var flavorByName map[string]RTAFlavor
@@ -125,6 +140,17 @@ func (f RTAFlavor) String() string {
 		return flavorNames[f]
 	}
 	return fmt.Sprintf("unknown(%d)", int(f))
+}
+
+// isFlowBased reports whether the flavor resolves a call site from the values
+// that actually reach it, rather than from a global pool of instantiated
+// types. Flow-based flavors resolve an injected interface to the single
+// implementation the container supplied — usually a wrapper — where the
+// type-based ones additionally report a direct edge to everything else that
+// implements the interface. Pruning has to account for the difference (see
+// spliceDelegators).
+func (f RTAFlavor) isFlowBased() bool {
+	return f == FlavorVTA || f == FlavorVTAStrict
 }
 
 // ParseRTAFlavor parses a single flavor string into an RTAFlavor.
@@ -170,6 +196,10 @@ func (f RTAFlavor) NewImpl() (rta.RTA, []rta.AnalyzeOption) {
 		return prta_kumo.New(), nil
 	case FlavorPRTAKumoNonblocking:
 		return prta_kumo_nonblocking.New(), nil
+	case FlavorVTA:
+		return vta.New(), nil
+	case FlavorVTAStrict:
+		return vta.New(vtacore.WithStrict()), nil
 	default:
 		return nil, nil
 	}

@@ -121,6 +121,15 @@ type Config struct {
 	// default) sends no organization ID, appropriate for a plain OpenAI-compatible endpoint. The
 	// monorepo fork sets this to its real internal org ID.
 	GenAIOrgID string
+	// DelegatorPackagePatterns lists regexps (regexp syntax, matched against a package's full
+	// import path) identifying generated delegator packages: packages whose functions do nothing
+	// but forward to the implementation they wrap (e.g. generated decorators or interceptors).
+	// Such packages are typically also excluded from reported paths. Under a flow-based call-graph
+	// flavor (vta, vta_strict) the delegator is the only callee the analysis resolves, so dropping
+	// it would sever the path; the graph builder instead splices the delegator's callers to what
+	// it delegates to (see graph.Config.DelegatorPackagePatterns). Empty (the OSS default) disables
+	// splicing; type-based flavors never need it.
+	DelegatorPackagePatterns []string
 }
 
 // Default returns a Config with the zero-value (all integrations disabled) settings.

@@ -685,15 +685,16 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		d.Logger.Infow("RTA configuration", "flavor", rtaFlavor, "num_workers", rtaNumWorkers)
 
 		graphConfig := graph.Config{
-			DisableSCCPAnalysis:     d.opts.DisableSCCPAnalysis,
-			DisableRelaxedContext:   slices.Contains(d.opts.Config.GraphDisableContextRelaxServices, serviceName),
-			DisableParallelCallTree: d.opts.DisableParallelCallTree,
-			RTAFlavor:               rtaFlavor,
-			RTANumWorkers:           rtaNumWorkers,
-			PermutationThreshold:    d.opts.PermutationThreshold,
-			CanonicalEdgeOrder:      d.opts.CanonicalEdgeOrder,
-			CodebasePkgPrefix:       d.opts.Config.CodebasePkgPrefix,
-			SafeGoPkgPath:           d.opts.Config.SafeGoPkgPath,
+			DisableSCCPAnalysis:      d.opts.DisableSCCPAnalysis,
+			DisableRelaxedContext:    slices.Contains(d.opts.Config.GraphDisableContextRelaxServices, serviceName),
+			DisableParallelCallTree:  d.opts.DisableParallelCallTree,
+			RTAFlavor:                rtaFlavor,
+			RTANumWorkers:            rtaNumWorkers,
+			PermutationThreshold:     d.opts.PermutationThreshold,
+			CanonicalEdgeOrder:       d.opts.CanonicalEdgeOrder,
+			CodebasePkgPrefix:        d.opts.Config.CodebasePkgPrefix,
+			SafeGoPkgPath:            d.opts.Config.SafeGoPkgPath,
+			DelegatorPackagePatterns: d.opts.Config.DelegatorPackagePatterns,
 		}
 		if d.opts.Config.ExcludePackagePatterns != nil || len(d.opts.Config.ExtraExcludePackagePatterns) > 0 {
 			base := graph.DefaultExcludePackagePatterns
