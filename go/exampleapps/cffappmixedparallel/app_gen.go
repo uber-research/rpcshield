@@ -99,7 +99,7 @@ func _cffParallelcffappmixedparallel_41_9[
 	schedEmitter := cff.NopEmitter().SchedulerInit(&cff.SchedulerInfo{
 		Name:      "",
 		Directive: cff.ParallelDirective,
-		File:      "code.uber.internal/go/cff/internal/tests/mixedparallel/mixedparallel.go",
+		File:      "go.uber.org/cff/internal/tests/mixedparallel/mixedparallel.go",
 		Line:      41,
 		Column:    9,
 	})
@@ -257,7 +257,7 @@ func _cffParallelcffappmixedparallel_59_9[
 	schedEmitter := cff.NopEmitter().SchedulerInit(&cff.SchedulerInfo{
 		Name:      "",
 		Directive: cff.ParallelDirective,
-		File:      "code.uber.internal/go/cff/internal/tests/mixedparallel/mixedparallel.go",
+		File:      "go.uber.org/cff/internal/tests/mixedparallel/mixedparallel.go",
 		Line:      59,
 		Column:    9,
 	})

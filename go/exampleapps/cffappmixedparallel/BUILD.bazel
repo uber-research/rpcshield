@@ -5,7 +5,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_path")
 # tool actually emits for a single cff.Parallel with multiple mixed task/slice arguments (including
 # a bound-method task) and for two cff.Slice arguments over the same element type -- captured via
 # `bazel build --output_groups=go_generated_srcs` against a throwaway internal fixture
-# (code.uber.internal/go/cff/internal/tests/mixedparallel) and adapted here (see app_gen.go's doc
+# (go.uber.org/cff/internal/tests/mixedparallel) and adapted here (see app_gen.go's doc
 # comment for the exact provenance and shape).
 # keep
 go_library(

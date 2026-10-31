@@ -56,7 +56,7 @@ func _cffParallelcffappmapend_18_9[
 	schedEmitter := cff.NopEmitter().SchedulerInit(&cff.SchedulerInfo{
 		Name:      "",
 		Directive: cff.ParallelDirective,
-		File:      "code.uber.internal/go/cff/internal/tests/mapendctx/mapendctx.go",
+		File:      "go.uber.org/cff/internal/tests/mapendctx/mapendctx.go",
 		Line:      18,
 		Column:    9,
 	})
