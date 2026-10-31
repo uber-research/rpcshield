@@ -274,16 +274,27 @@ func isStandardLibraryOrRelativeImport(path string) bool {
 // mapImportToDiskPath maps a user import to an absolute path under GOPATH.
 func (br *defaultFSRenamer) mapImportToDiskPath(importPath string) string {
 	importPath = strings.TrimSpace(importPath)
-	// Skip standard library and relative imports.
-	if isStandardLibraryOrRelativeImport(importPath) {
-		return ""
-	}
 	full := filepath.Join(br.gopath, "src", importPath)
 	abs, err := br.fs.Abs(full)
 	if err != nil {
 		return ""
 	}
+	// A dot-free import path normally means the standard library, but Bazel codegen also
+	// produces dot-free import paths that get lifted into the GOPATH (e.g. gen/..., thriftrw/...,
+	// gogoproto/... and similar generated trees). Treating those as standard library hides their
+	// "internal" directories from the renamer, and the lifted tree then fails to load with
+	// "use of internal package ... not allowed". The two are easy to tell apart on disk: the
+	// standard library lives in GOROOT and never has a directory under GOPATH/src.
+	if isStandardLibraryOrRelativeImport(importPath) && !br.isDirInGoPath(abs) {
+		return ""
+	}
 	return abs
+}
+
+// isDirInGoPath reports whether absPath is an existing directory in the lifted GOPATH.
+func (br *defaultFSRenamer) isDirInGoPath(absPath string) bool {
+	fi, err := br.fs.Stat(absPath)
+	return err == nil && fi.IsDir()
 }
 
 // findAllInternalDirsInPath returns a slice of absolute directories (each ending in "internal")
