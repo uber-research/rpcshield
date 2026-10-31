@@ -38,6 +38,8 @@ go_library(
         "//rta/srta_kumo:go_default_library",
         "//rta/srta_opt:go_default_library",
         "//rta/srta_struct:go_default_library",
+        "//rta/vta:go_default_library",
+        "//vta:go_default_library",
         "@org_golang_x_tools//go/ast/astutil:go_default_library",
         "@org_golang_x_tools//go/callgraph:go_default_library",
         "@org_golang_x_tools//go/callgraph/cha:go_default_library",

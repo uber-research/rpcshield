@@ -184,6 +184,11 @@ type Config struct {
 	// deterministic order before call-tree exploration, so convergence pruning does
 	// not depend on the order packages happened to be loaded in.
 	CanonicalEdgeOrder bool
+	// DelegatorPackagePatterns identifies generated delegator packages (see
+	// config.Config.DelegatorPackagePatterns). When the RTA flavor is flow-based, callers of a
+	// blocked delegator are reconnected to what it delegates to before the delegator is removed
+	// from the graph, so that removing the frame shortens a path instead of deleting it.
+	DelegatorPackagePatterns []string
 }
 
 // builderImpl is a struct that builds a call graph from a set of packages.
@@ -225,6 +230,10 @@ type builderImpl struct {
 	excludePkgRegexOnce sync.Once
 	excludePkgRegex     []*regexp.Regexp
 	excludePkgRegexErr  error
+	// delegatorPkgRegexOnce/delegatorPkgRegex cache the compiled Config.DelegatorPackagePatterns
+	// (see builderImpl.delegatorRegexps).
+	delegatorPkgRegexOnce sync.Once
+	delegatorPkgRegex     []*regexp.Regexp
 	// safeGoRegexOnce/safeGoPkgRegex/safeGoCallerPattern cache the two regexes derived from
 	// config.SafeGoPkgPath (or DefaultSafeGoPkgPath), computed once per builderImpl and reused
 	// by every safego-detection call -- see safegoenricher.go.

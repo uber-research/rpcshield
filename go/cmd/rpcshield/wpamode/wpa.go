@@ -153,6 +153,8 @@ type Options struct {
 	InfraPkgPrefixes              []string
 	KnownErrorConstructorFuncs    []string
 	SafeGoPkgPath                 string
+	// DelegatorPackagePatterns is passed through to config.Config.DelegatorPackagePatterns.
+	DelegatorPackagePatterns []string
 	// GraphDisableContextRelaxServices and BazelLoaderServices are passed straight through to the
 	// matching config.Config fields -- see that struct's doc comments for what each one does. Both
 	// are empty (the OSS default) unless the caller supplies an organization-specific value.
@@ -270,6 +272,7 @@ func Run(options Options) (rpcshield.Result, error) {
 		InfraPkgPrefixes:                 options.InfraPkgPrefixes,
 		KnownErrorConstructorFuncs:       options.KnownErrorConstructorFuncs,
 		SafeGoPkgPath:                    options.SafeGoPkgPath,
+		DelegatorPackagePatterns:         options.DelegatorPackagePatterns,
 		GraphDisableContextRelaxServices: options.GraphDisableContextRelaxServices,
 		BazelLoaderServices:              options.BazelLoaderServices,
 		GrailHost:                        options.GrailHost,
