@@ -77,12 +77,13 @@ func TestFinder_FindInbounds(t *testing.T) {
 	require.ElementsMatch(t, expected, got)
 }
 
-func TestFinder_FindInbounds_GenericGRPCThrift(t *testing.T) {
-	t.Parallel()
-
+// genericGRPCThriftInbounds runs inbound detection on the genericgrpcthrift example app with
+// generic gRPC/Thrift detection on; configure adjusts the Finder before the run.
+func genericGRPCThriftInbounds(t *testing.T, configure func(*Finder)) []inboundRepr {
 	inboundService := grail.Service{Name: "genericgrpcthrift", Tier: -1}
 	mapper := servicemapping.New(nil /* services */, nil /* provider */, nil /* logger */)
 	finder := New(inboundService, mapper, nil /* logger */, nil /* keepIBPkgs */, "" /* codebasePkgPrefix */, "" /* kafkaConsumerProxyPkgPath */, nil /* infraPkgPrefixes */, true /* enableGenericGRPCThriftDetection */)
+	configure(finder)
 
 	entryPkg, allPkgs, err := loader.LoadWithGoPath("rpcshield", []string{"exampleapps", "outbounds", "genericgrpcthrift", "genericgrpcthrift-anal"}, "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift")
 	require.NoError(t, err)
@@ -93,32 +94,71 @@ func TestFinder_FindInbounds_GenericGRPCThrift(t *testing.T) {
 	inbounds, err := finder.Inbound(entryPkg, allPkgs, ssaProg)
 	require.NoError(t, err)
 
-	type InboundRepr struct {
-		PkgPath       string
-		FullFuncName  string
-		CanonicalName string
-		Type          fty.EndpointType
-	}
-	got := make([]InboundRepr, 0, len(inbounds))
+	got := make([]inboundRepr, 0, len(inbounds))
 	for _, point := range inbounds {
-		got = append(got, InboundRepr{PkgPath: point.Pkg.PkgPath, FullFuncName: point.Func.FullName(), CanonicalName: point.CanonicalName, Type: point.Type})
+		got = append(got, inboundRepr{PkgPath: point.Pkg.PkgPath, FullFuncName: point.Func.FullName(), CanonicalName: point.CanonicalName, Type: point.Type})
 	}
+	return got
+}
 
-	expected := []InboundRepr{
-		{
-			PkgPath:       "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift",
-			FullFuncName:  "(github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift.fooServerImpl).Foo",
-			CanonicalName: "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift/pb__foo",
-			Type:          fty.TypeGRPC,
-		},
-		{
-			PkgPath:       "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift",
-			FullFuncName:  "(github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift.barHandlerImpl).Bar",
-			CanonicalName: "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift/pb__bar",
-			Type:          fty.TypeThrift,
-		},
-	}
-	require.ElementsMatch(t, expected, got)
+type inboundRepr struct {
+	PkgPath       string
+	FullFuncName  string
+	CanonicalName string
+	Type          fty.EndpointType
+}
+
+// _genericGRPCThriftImplementers are the handlers the implements-based rules find in the
+// genericgrpcthrift example app: types that implement a whole server interface.
+var _genericGRPCThriftImplementers = []inboundRepr{
+	{
+		PkgPath:       "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift",
+		FullFuncName:  "(github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift.fooServerImpl).Foo",
+		CanonicalName: "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift/pb__foo",
+		Type:          fty.TypeGRPC,
+	},
+	{
+		PkgPath:       "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift",
+		FullFuncName:  "(github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift.barHandlerImpl).Bar",
+		CanonicalName: "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift/pb__bar",
+		Type:          fty.TypeThrift,
+	},
+}
+
+// _genericGRPCThriftRegisteredOnly are the handlers only the registration-rooted rule finds:
+// partial implementations composed into one handler that reaches its registration through an
+// interface-typed local variable.
+var _genericGRPCThriftRegisteredOnly = []inboundRepr{
+	{
+		PkgPath:       "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift",
+		FullFuncName:  "(github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift.bazPart).Baz",
+		CanonicalName: "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift/pb__baz",
+		Type:          fty.TypeGRPC,
+	},
+	{
+		PkgPath:       "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift",
+		FullFuncName:  "(*github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift.quxPart).Qux",
+		CanonicalName: "github.com/uber-research/rpcshield/go/exampleapps/outbounds/genericgrpcthrift/pb__qux",
+		Type:          fty.TypeGRPC,
+	},
+}
+
+// TestFinder_FindInbounds_GenericGRPCThrift checks the default configuration: the handlers the
+// implements-based rules find plus the ones only registration finds.
+func TestFinder_FindInbounds_GenericGRPCThrift(t *testing.T) {
+	t.Parallel()
+
+	got := genericGRPCThriftInbounds(t, func(*Finder) {})
+	require.ElementsMatch(t, append(append([]inboundRepr{}, _genericGRPCThriftImplementers...), _genericGRPCThriftRegisteredOnly...), got)
+}
+
+// TestFinder_FindInbounds_GenericGRPCThrift_RegistrationDisabled checks that turning
+// registration-rooted detection off leaves exactly the implements-based rules' handlers.
+func TestFinder_FindInbounds_GenericGRPCThrift_RegistrationDisabled(t *testing.T) {
+	t.Parallel()
+
+	got := genericGRPCThriftInbounds(t, func(f *Finder) { f.DisableRegistrationInbounds() })
+	require.ElementsMatch(t, _genericGRPCThriftImplementers, got)
 }
 
 // Tests requiring Go SDK in runtime need a real `go` binary on PATH -- see

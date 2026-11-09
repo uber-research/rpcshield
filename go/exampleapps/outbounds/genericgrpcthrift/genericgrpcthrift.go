@@ -29,6 +29,37 @@ func setupGRPCServer() {
 	pb.RegisterFooServer(s, fooServerImpl{})
 }
 
+// bazPart and quxPart each implement one method of pb.BazServer. Neither implements the whole
+// interface, and the composite handler built from them only ever has the interface as its static
+// type outside newBazServer, so the implements-based rule cannot attribute their methods to a
+// server. The registration-rooted rule follows srv in setupCompositeServer to its single
+// assignment, then newBazServer's return statement, and finds them.
+type bazPart struct{}
+
+func (bazPart) Baz(context.Context) error { return nil }
+
+type quxPart struct{}
+
+func (*quxPart) Qux(context.Context) error { return nil }
+
+// newBazServer assembles a handler from bazPart and quxPart, the way services compose a server
+// from per-feature partial implementations, and returns it as the server interface, the
+// idiomatic constructor shape.
+func newBazServer() pb.BazServer {
+	return struct {
+		bazPart
+		*quxPart
+	}{bazPart{}, &quxPart{}}
+}
+
+// setupCompositeServer registers the handler newBazServer builds through an interface-typed local
+// variable.
+func setupCompositeServer() {
+	s := grpc.NewServer()
+	srv := newBazServer()
+	pb.RegisterBazServer(s, srv)
+}
+
 // callBar exercises pb.BarClient.Bar as an outbound call site.
 func callBar(c *pb.BarClient) error {
 	return c.Bar(context.Background())

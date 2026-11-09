@@ -7,6 +7,7 @@ go_library(
         "finder.go",
         "inbound.go",
         "outbound.go",
+        "registration.go",
     ],
     importpath = "github.com/uber-research/rpcshield/go/finder",
     visibility = ["//visibility:public"],
@@ -30,6 +31,7 @@ go_test(
     srcs = [
         "inbound_test.go",
         "outbound_test.go",
+        "registration_test.go",
     ],
     data = [
         "//exampleapps/outbounds/cadence:cadence-anal",

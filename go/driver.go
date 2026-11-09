@@ -133,6 +133,9 @@ type DriverOptions struct {
 	KeepIBPkgs map[string]bool
 	// CGConstructionOnly is the flag to only run CG construction for eval bench (skip outbound detection and path analysis).
 	CGConstructionOnly bool
+	// DetectOnly stops after inbound/outbound detection: no call graph, path exploration or
+	// analyzers. Result.Inbounds/Outbounds are populated; used to evaluate detection.
+	DetectOnly bool
 	// CheckIsomorphism enables isomorphism checking between srta and prta_kumo_nonblocking.
 	CheckIsomorphism bool
 	// PermutationThreshold is the number of times the same function-set hash must
@@ -588,6 +591,9 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		start = time.Now()
 		d.ServiceMapper.RankCachedServices(pkgs)
 		f := finder.New(curService, d.ServiceMapper, d.Logger, d.opts.KeepIBPkgs, d.opts.Config.CodebasePkgPrefix, d.opts.Config.KafkaConsumerProxyPkgPath, d.opts.Config.InfraPkgPrefixes, d.opts.Config.EnableGenericGRPCThriftDetection, d.opts.Config.AdditionalHTTPClientTypes...)
+		if d.opts.Config.DisableRegistrationInboundDetection {
+			f.DisableRegistrationInbounds()
+		}
 		inbounds, err := f.Inbound(entryPkg, pkgs, ssaProg)
 		if err != nil {
 			return result, fmt.Errorf("find inbound: %w", err)
@@ -631,6 +637,14 @@ func (d *Driver) Run(ctx context.Context, serviceName string) (result Result, er
 		result.Outbounds = fty.MergeOutboundPoints(result.Outbounds, outbounds)
 		result.RunMetrics[_outboundCount] += float64(len(outbounds))
 		result.RunMetrics[_ibObDetectionDurationSecs] += time.Now().Sub(start).Seconds()
+
+		if d.opts.DetectOnly {
+			if tidx == len(targets)-1 {
+				result.Status = Success
+				return result, nil
+			}
+			continue
+		}
 
 		// Continue to the next target if there are no inbound or outbound points. Note that we do not actually
 		// fail the entire run since it is possible that some targets do not have any RPC traffic (e.g., utility binaries).

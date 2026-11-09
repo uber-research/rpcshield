@@ -174,6 +174,8 @@ func main() {
 		htmlOut             = flag.Bool("html", true, "write an HTML report")
 		fixtureFile         = flag.String("fixture-file", "", "path to a known-answer fixture .go file to overlay (see ../fixtures/); when set, this replaces -target-pkg as the load pattern")
 		fixturePkgDir       = flag.String("fixture-pkg-dir", "oss_pipeline_bench_fixture", "virtual directory (relative to target-dir) the fixture file is overlaid at")
+		detectOnly          = flag.Bool("detect-only", false, "stop after inbound/outbound detection (no call graph, path exploration or analyzers); writes <service>_result.json with Inbounds/Outbounds only")
+		registrationIBs     = flag.Bool("registration-inbounds", true, "also find RPC handlers from the calls that register them with a server (see config.Config.DisableRegistrationInboundDetection); -registration-inbounds=false leaves only the other inbound rules")
 		debug               = flag.Bool("debug", false, "enable Debug-level driver logging (very verbose -- the SSA/SCCP analyzer logs per-instruction; only practical on small fixtures)")
 		codebasePrefix      = flag.String("codebase-pkg-prefix", "", "import-path prefix of the target's own code, required to scope outbound-call scanning to the service under test; without it, finder.Outbound's f.codebasePkgPrefix check (an empty-string prefix matches everything) scans every transitive dependency's own internals too, e.g. matching grpc-go's own ClientConn-holding structs as false-positive outbound clients")
 		dropExcludePatterns = flag.String("drop-exclude-package-patterns", "", "comma-separated exact entries to remove from graph.DefaultExcludePackagePatterns before analyzing this target (see config.Config.ExcludePackagePatterns). Needed when the target's own module path matches one of those default entries -- e.g. analyzing jaegertracing/jaeger itself requires dropping \"^github.com/jaegertracing(/.*)?$\", since that pattern assumes jaegertracing/jaeger is always a *dependency*, never the analyzed target, and otherwise the target's entire codebase is silently excluded from the call graph before analysis starts")
@@ -202,7 +204,7 @@ func main() {
 	// shape is load-bearing, see driver.go's findPackageFromTarget.
 	target := "//src/" + entryPkg.PkgPath + ":oss"
 
-	cfg := config.Config{EnableGenericGRPCThriftDetection: true, CodebasePkgPrefix: *codebasePrefix}
+	cfg := config.Config{EnableGenericGRPCThriftDetection: true, DisableRegistrationInboundDetection: !*registrationIBs, CodebasePkgPrefix: *codebasePrefix}
 	if *dropExcludePatterns != "" {
 		drop := make(map[string]bool)
 		for _, p := range strings.Split(*dropExcludePatterns, ",") {
@@ -230,13 +232,14 @@ func main() {
 			constant.SSA:               true,
 			constant.AST:               true,
 		},
-		GitSHA:    "oss",
-		CSV:       *csvOut,
-		HTML:      *htmlOut,
-		OutputDir: *outputDir,
-		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		RTAFlavor: "srta",
-		Config:    cfg,
+		GitSHA:     "oss",
+		CSV:        *csvOut,
+		HTML:       *htmlOut,
+		OutputDir:  *outputDir,
+		Timestamp:  time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		RTAFlavor:  "srta",
+		Config:     cfg,
+		DetectOnly: *detectOnly,
 	}
 
 	svc := grail.Service{Name: svcName, Tier: -1}

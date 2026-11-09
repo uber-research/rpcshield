@@ -46,6 +46,10 @@ type Finder struct {
 	// config.Config.EnableGenericGRPCThriftDetection).
 	enableGenericGRPCThriftDetection bool
 
+	// disableRegistrationInbounds turns off registration-rooted inbound detection (see
+	// registration.go), which is on by default.
+	disableRegistrationInbounds bool
+
 	// canonicalServiceNameCache is a cache for the canonical service name for a given
 	// (gogoproto or thriftrw) package path.
 	canonicalServiceNameCache map[string]string
@@ -82,6 +86,13 @@ func New(currentService grail.Service, serviceMapper servicemapping.ServiceMappe
 		enableGenericGRPCThriftDetection: enableGenericGRPCThriftDetection,
 		additionalHTTPClientTypes:        additionalHTTPClientTypes,
 	}
+}
+
+// DisableRegistrationInbounds turns off registration-rooted inbound detection, which is on by
+// default: handlers are also found from the registration calls that hand them to a server (see
+// registration.go and config.Config.DisableRegistrationInboundDetection).
+func (f *Finder) DisableRegistrationInbounds() {
+	f.disableRegistrationInbounds = true
 }
 
 // canonicalServiceName returns the canonical service name for the given generated package

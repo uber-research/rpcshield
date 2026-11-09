@@ -83,6 +83,12 @@ type Config struct {
 	// detection byte-for-byte unchanged; an OSS fork analyzing repos that use vanilla grpc-go or
 	// apache/thrift instead of YARPC should set this true.
 	EnableGenericGRPCThriftDetection bool
+	// DisableRegistrationInboundDetection turns off registration-rooted inbound detection, which
+	// is on by default: RPC handlers are also found from the calls that register them with a
+	// server, following the handler argument's type to the concrete handler types (see
+	// finder/registration.go and finder/README.md). The handlers found this way are added to the
+	// ones the other inbound rules find. True leaves only the other rules.
+	DisableRegistrationInboundDetection bool
 	// GraphDisableContextRelaxServices lists service names for which graph.Config's "relaxed
 	// context" call-tree feature should be force-disabled, as a workaround for services whose call
 	// graph is large/complex enough that the feature causes analysis timeouts. Empty disables it
