@@ -106,7 +106,11 @@ gRPC/Thrift clients, Cadence/Temporal workflow clients, and HTTP clients (`net/h
 configurable additional client types). Detection matches on package path + type name against each
 shape's `types.Object`, e.g. an embedded client struct field or a `Register*Server` call's second
 argument type — new frameworks are added by teaching `finder/` one more shape, not by changing
-anything downstream.
+anything downstream. Handlers are also found from their registration: every generated registrar
+(`Register*Server`, YARPC procedure builders, TChannel server constructors, Thrift processors) is
+recognized by its signature, and the registered value is followed through constructors, local
+variables, struct fields and fx to the concrete handler types. `finder/README.md` explains the
+RPC stacks, every rule, and how to add one.
 
 For **outbound** call sites specifically, `finder/servicemapping.ServiceMapper.InferService` then
 answers "which service actually implements this RPC client interface?" — the API-to-implementation

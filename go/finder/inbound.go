@@ -208,6 +208,19 @@ func (f *Finder) Inbound(entryPkg *packages.Package, allPkgs []*packages.Package
 		}
 	}
 
+	if !f.disableRegistrationInbounds {
+		// Handlers found from registration sites are added to the ones found above; a handler
+		// found both ways keeps the entry from above.
+		added := 0
+		for _, inbound := range f.registrationInbounds(allPkgs, codebasePkgs, codebase.PkgMap) {
+			if _, ok := inbounds[inbound.Func]; !ok {
+				inbounds[inbound.Func] = inbound
+				added++
+			}
+		}
+		f.logger.Infow("Found registered handlers", "num_added", added)
+	}
+
 	result := make([]fty.InboundPoint, 0, len(inbounds))
 	for _, inbound := range inbounds {
 		result = append(result, inbound)
