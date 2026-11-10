@@ -52,36 +52,43 @@ bazel build //pipeline_evaluation_scripts/cmd/oss_pipeline_bench:oss_pipeline_be
 
 ## Current sweep status (all 11 `targets.csv` rows)
 
-Last full run: 2026-07-24, `oss_pipeline_bench` built from `~/rpcshield/go` at HEAD. All 11 targets
-completed without crashing or timing out (`run_oss_pipeline_sweep.sh` summary: `total: 11, ok: 11,
-failed: 0, timed out: 0`).
+Last full run: 2026-11-10, `oss_pipeline_bench` built from this branch, registration-rooted inbound
+detection on (the default). All 11 targets completed without crashing or timing out
+(`run_oss_pipeline_sweep.sh` summary: `total: 11, ok: 11, failed: 0, timed out: 0`), and
+`check_fixture.sh` passes.
 
-| target | inbounds (found/expected) | outbounds (found/expected) | reports | status |
+| target | inbounds | outbounds | reports | status |
 | --- | --- | --- | --- | --- |
-| etcd-server | 36/36 | 353/356 | 39 | success |
-| temporal-server | 152/152 | 732/770 | 72 | success |
-| thanos | 3 | 53 | 0 | success_no_call_paths |
-| argo-server | 40 | 154 | 0 | success_no_call_paths |
-| vitess-vtgate | 8/8 | 76/76 | 29 | success |
-| cortex | 16/16 | 63/63 | 9 | success |
-| vitess-vttablet | 103/103 | 142/142 | 98 | success |
+| etcd-server | 113 | 356 | 97 | success |
+| temporal-server | 211 | 770 | 133 | success |
+| thanos | 31 | 53 | 0 | success_no_call_paths |
+| argo-server | 77 | 154 | 0 | success_no_call_paths |
+| vitess-vtgate | 8 | 76 | 30 | success |
+| cortex | 28 | 63 | 10 | success |
+| vitess-vttablet | 103 | 142 | 99 | success |
 | trillian-log-server | 20 | 4 | 0 | success_no_call_paths |
-| loki | 29/29 | 70/71 | 24 | success |
-| jaeger-collector | 20 | 16/29 | 9 | success |
-| jaeger-remote-storage | 14/14 | 14/19 | 9 | success |
+| loki | 43 | 71 | 41 | success |
+| jaeger-collector | 20 | 29 | 10 | success |
+| jaeger-remote-storage | 14 | 19 | 10 | success |
+
+`inbounds` and `outbounds` are the lengths of `Inbounds`/`Outbounds` in `<target>_result.json`;
+`reports` is the number of rows in `<target>.csv`.
 
 Notes:
 - `success_no_call_paths` (thanos, argo-server, trillian-log-server) means the driver ran to
   completion but found no inbound-to-outbound call path for the detected entry points/outbounds on
   that entrypoint package -- not a crash or regression, just no findings for the current detection
   shapes on that target's `pkg`.
-- `jaeger-collector`'s outbound count (16 found vs. 29 expected) reflects one inbound
-  (`GRPCHandler.Capabilities`) that RTA marks reachable via a plugin-only dynamic dispatch it can't
-  resolve in this binary; `graph.go`'s `synthesizeMissingInboundNodes` gives it an isolated
-  call-graph node (logged as `num_synthesized: 1`) instead of aborting the whole run, which is why
-  the target still completes with `status: success` and produces 9 reports for its other paths.
-- "found/expected" is omitted (single number only) for targets where `expected` wasn't separately
-  tracked in the driver log for that inbound/outbound count.
+- Registration-rooted inbound detection (`finder/registration.go`) accounts for the inbound counts
+  above being higher than those of the implements-based rules alone (etcd-server 51, temporal-server
+  148, thanos 5, argo-server 53, cortex 16, loki 29; the others are unchanged). Outbound counts are
+  identical with the rule on and off. Pass `-registration-inbounds=false` to reproduce the old
+  counts.
+- `jaeger-collector` has one inbound (`GRPCHandler.Capabilities`) that RTA marks reachable via a
+  plugin-only dynamic dispatch it can't resolve in this binary; `graph.go`'s
+  `synthesizeMissingInboundNodes` gives it an isolated call-graph node (logged as
+  `num_synthesized: 1`) instead of aborting the whole run, which is why the target still completes
+  with `status: success` and produces reports for its other paths.
 
 ## Direct binary invocation (single target, useful for smoke tests)
 
