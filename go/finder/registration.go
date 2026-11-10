@@ -6,7 +6,7 @@ package finder
 // handlers from registration, so detection starts at the registration and follows types:
 //
 //  1. A registrar is a generated function with one of the signature shapes the RPC code
-//     generators emit (see registrarShapeOf). Its handler parameter's type is the server
+//     generators emit (registration_shape.go). Its handler parameter's type is the server
 //     interface.
 //  2. A registration site is (a) a call of a registrar, (b) a use of a registrar as a function
 //     value, for example fx.Provide(fooserver.New), or (c) a call, from hand-written code, of a
@@ -16,21 +16,21 @@ package finder
 //  3. The handler type is the static type of the handler argument. If that type is an interface,
 //     the argument is resolved to concrete types by following the value where the syntax shows
 //     it: the return statements of a statically called constructor, the only assignment of a
-//     local variable, or the expressions stored into a struct field. Anything else is resolved
-//     through type-keyed flows ("an expression of static type A is used where interface I is
-//     expected").
+//     local variable, or the expressions stored into a struct field (registration_resolve.go).
+//     Anything else is resolved through type-keyed flows ("an expression of static type A is
+//     used where interface I is expected"), gathered in one pass over the program
+//     (registration_flows.go).
 //  4. The handlers are the server interface's methods, selected from the registered type's
 //     method set. A method promoted from an embedded interface field is resolved through the
 //     values of that field, in the same way.
 //
-// Only syntax and types are used: no SSA and no call graph.
+// Only syntax and types are used: no SSA and no call graph. This file holds the index and the
+// steps 1, 2 and 4; finder/README.md section 2.4 describes the rule and its measured effect.
 
 import (
 	"go/ast"
 	"go/token"
 	"go/types"
-	"regexp"
-	"strconv"
 	"strings"
 
 	rpcshieldconst "github.com/uber-research/rpcshield/go/constant"
@@ -38,36 +38,6 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/typeutil"
 )
-
-const (
-	// _maxFlowDepth bounds the interface-to-interface hops followed when resolving an interface
-	// type to the concrete types that flow into it.
-	_maxFlowDepth = 12
-	// _maxResolveDepth bounds the resolution of an expression through constructor returns and
-	// local variable assignments.
-	_maxResolveDepth = 6
-)
-
-// _generatedMarker matches the comment lines that mark a generated file: the Go convention
-// ("// Code generated ... DO NOT EDIT."), the same line without its ending, which some
-// generators split over several lines, and the "@generated" line the thriftrw and YARPC
-// generators emit.
-var _generatedMarker = regexp.MustCompile(`^// Code generated |^// @generated`)
-
-// isGeneratedFile reports whether a marker comment precedes the file's package clause.
-func isGeneratedFile(file *ast.File) bool {
-	for _, group := range file.Comments {
-		if group.Pos() > file.Package {
-			break
-		}
-		for _, c := range group.List {
-			if _generatedMarker.MatchString(c.Text) {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // registrar is a generated server registration function.
 type registrar struct {
@@ -92,17 +62,6 @@ type funcDeclInfo struct {
 	info *types.Info
 }
 
-// fieldStore is an expression stored into a struct field, by a composite literal or an
-// assignment.
-type fieldStore struct {
-	info *types.Info
-	// scope is the top-level declaration the store appears in.
-	scope ast.Node
-	expr  ast.Expr
-	// index is the result number if expr is a call that yields numResults values, else -1.
-	index, numResults int
-}
-
 // registrationIndex holds the program facts registration-rooted detection needs.
 type registrationIndex struct {
 	fset *token.FileSet
@@ -113,10 +72,10 @@ type registrationIndex struct {
 	// fxRegistrars maps a generated fx registration function to the registrars whose server
 	// interfaces its closure takes as parameter-struct fields.
 	fxRegistrars map[*types.Func][]*registrar
-	// flows maps an interface type (by its type string) to the types of the expressions used
-	// where that interface is expected.
+	// flows maps an interface type (by typeKey) to the types of the expressions used where that
+	// interface is expected.
 	flows map[string]*typeSet
-	// fieldStores maps a struct field (see fieldKey) to the expressions stored into it.
+	// fieldStores maps a struct field (by fieldKey) to the expressions stored into it.
 	fieldStores map[string][]fieldStore
 	// openFields is the set of struct fields whose values cannot be read off the stores: the
 	// field's address is taken, or its struct is populated by fx (it embeds fx.In or dig.In).
@@ -125,158 +84,20 @@ type registrationIndex struct {
 	decls map[*types.Func]funcDeclInfo
 }
 
-// fieldKey identifies a field by its struct type and name. Struct types that are identical, and
-// so convertible or assignable to each other, share their keys.
-func fieldKey(st *types.Struct, name string) string {
-	return types.TypeString(st, nil) + "." + name
-}
-
-// fieldKeyOf returns the key of the field reached from a value of type recv through the field
-// index path. ok is false if the path does not end at a field, or if the field's struct is an
-// instantiated generic type, whose stores are not tracked.
-func fieldKeyOf(recv types.Type, path []int) (key string, ok bool) {
-	if len(path) == 0 {
-		return "", false
-	}
-	cur := recv
-	for n, i := range path {
-		if ptr, isPtr := cur.Underlying().(*types.Pointer); isPtr {
-			cur = ptr.Elem()
-		}
-		named, isNamed := types.Unalias(cur).(*types.Named)
-		st, isStruct := cur.Underlying().(*types.Struct)
-		if !isStruct || i >= st.NumFields() {
-			return "", false
-		}
-		if n == len(path)-1 {
-			if isNamed && named.TypeArgs().Len() > 0 {
-				return "", false
-			}
-			return fieldKey(st, st.Field(i).Name()), true
-		}
-		cur = st.Field(i).Type()
-	}
-	return "", false
-}
-
-// typeSet is an insertion-ordered set of types, keyed by type string.
-type typeSet struct {
-	seen  map[string]bool
-	types []types.Type
-}
-
-func (s *typeSet) add(t types.Type) {
-	k := typeKey(t)
-	if s.seen == nil {
-		s.seen = make(map[string]bool)
-	}
-	if !s.seen[k] {
-		s.seen[k] = true
-		s.types = append(s.types, t)
-	}
-}
-
-// typeKey returns a string that identifies t. Strings are used instead of typeutil.Map so that
-// the index does not depend on how the x/tools version in use hashes newer type kinds. A type
-// declared inside a function carries its declaration position, since its name is not unique in
-// its package.
-func typeKey(t types.Type) string {
-	t = types.Unalias(t)
-	key := types.TypeString(t, nil)
-	if named, ok := t.(*types.Named); ok && named.Obj().Pkg() != nil && named.Obj().Parent() != named.Obj().Pkg().Scope() {
-		key += "@" + strconv.Itoa(int(named.Obj().Pos()))
-	}
-	return key
-}
-
-func isInterfaceType(t types.Type) bool {
-	if _, ok := types.Unalias(t).(*types.TypeParam); ok {
-		return false
-	}
-	_, ok := t.Underlying().(*types.Interface)
-	return ok
-}
-
-// stripVendor removes a vendor directory prefix from a package path.
-func stripVendor(path string) string {
-	if i := strings.LastIndex(path, "/vendor/"); i >= 0 {
-		return path[i+len("/vendor/"):]
-	}
-	return strings.TrimPrefix(path, "vendor/")
-}
-
-// isNamedType reports whether t is the named type pkgPath.name, ignoring vendoring.
-func isNamedType(t types.Type, pkgPath, name string) bool {
-	n, ok := types.Unalias(t).(*types.Named)
-	return ok && n.Obj().Pkg() != nil && n.Obj().Name() == name && stripVendor(n.Obj().Pkg().Path()) == pkgPath
-}
-
-const (
-	_yarpcTransportPkg = "go.uber.org/yarpc/api/transport"
-	_yarpcProtobufPkg  = "go.uber.org/yarpc/encoding/protobuf"
-	_yarpcThriftPkg    = "go.uber.org/yarpc/encoding/thrift"
-	_tchannelThriftPkg = "github.com/uber/tchannel-go/thrift"
-	_grpcPkg           = "google.golang.org/grpc"
-	_apacheThriftPkg   = "github.com/apache/thrift/lib/go/thrift"
-)
-
-// importsPackageTree reports whether imports has root or a package below it, such as the "v2"
-// package of a YARPC encoding.
-func importsPackageTree(imports map[string]bool, root string) bool {
-	for path := range imports {
-		if path == root || strings.HasPrefix(path, root+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-// registrarShapeOf matches fn against the registration function shapes the RPC code generators
-// emit. It returns the index of the handler parameter and the endpoint type.
+// newRegistrationIndex builds the index in three passes over the loaded program.
 //
-//   - YARPC (protobuf and thrift): func(server I, ...) []transport.Procedure, in a package that
-//     imports the YARPC protobuf or thrift encoding
-//   - TChannel Thrift:             func(handler I) thrift.TChanServer
-//   - gRPC:                        func(s grpc.ServiceRegistrar | *grpc.Server, srv I)
-//   - Apache Thrift:               func(handler I) P, where P implements thrift.TProcessor
-func registrarShapeOf(fn *types.Func, imports map[string]bool, tProcessor *types.Interface) (handlerParam int, endpointType fty.EndpointType, ok bool) {
-	sig, isSig := fn.Type().(*types.Signature)
-	if !isSig || sig.Recv() != nil {
-		return 0, "", false
-	}
-	params, results := sig.Params(), sig.Results()
-	if results.Len() >= 1 && params.Len() >= 1 {
-		if sl, isSlice := types.Unalias(results.At(0).Type()).(*types.Slice); isSlice && isNamedType(sl.Elem(), _yarpcTransportPkg, "Procedure") {
-			switch {
-			case importsPackageTree(imports, _yarpcProtobufPkg):
-				return 0, fty.TypeGRPC, true
-			case importsPackageTree(imports, _yarpcThriftPkg):
-				return 0, fty.TypeThrift, true
-			}
-			return 0, "", false
-		}
-		if isNamedType(results.At(0).Type(), _tchannelThriftPkg, "TChanServer") {
-			return 0, fty.TypeThriftTChannel, true
-		}
-	}
-	if params.Len() == 2 && results.Len() == 0 {
-		first := params.At(0).Type()
-		if p, isPtr := types.Unalias(first).(*types.Pointer); isPtr {
-			if isNamedType(p.Elem(), _grpcPkg, "Server") {
-				return 1, fty.TypeGRPC, true
-			}
-		} else if isNamedType(first, _grpcPkg, "ServiceRegistrar") {
-			return 1, fty.TypeGRPC, true
-		}
-	}
-	if tProcessor != nil && params.Len() == 1 && results.Len() == 1 && types.Implements(results.At(0).Type(), tProcessor) {
-		return 0, fty.TypeThrift, true
-	}
-	return 0, "", false
-}
-
-// newRegistrationIndex collects generated files, registrars, fx registrars, type-keyed flows and
-// function declarations from the loaded program.
+//  1. Generated files (isGeneratedFile), and the Apache Thrift TProcessor interface if the
+//     program contains that package.
+//  2. Registrars: package-level functions declared in generated files whose signature matches
+//     registrarShapeOf and whose handler parameter is a named interface with at least one method.
+//     "func RegisterKVServer(s grpc.ServiceRegistrar, srv KVServer)" in kv_grpc.pb.go becomes
+//     the registrar of server KVServer; the same function in a hand-written file does not. One
+//     server interface may have several registrars (TChannel and YARPC both wrap a thriftrw
+//     interface); servers keeps the first for collectFxRegistrar.
+//  3. Every function declaration with a body: its declaration (for returnedTypes), the flows
+//     and field stores in it (collectFlows), and, for generated package-level functions, whether
+//     it is an fx registrar (collectFxRegistrar). Non-function declarations (package-level vars)
+//     contribute flows too.
 func newRegistrationIndex(allPkgs []*packages.Package) *registrationIndex {
 	ix := &registrationIndex{
 		generated:    make(map[*token.File]bool),
@@ -372,549 +193,18 @@ func newRegistrationIndex(allPkgs []*packages.Package) *registrationIndex {
 	return ix
 }
 
-// collectFxRegistrar records fn as an fx registrar if its body contains a closure with a
-// parameter struct that has a field of a server-interface type.
-func (ix *registrationIndex) collectFxRegistrar(info *types.Info, fn *types.Func, fd *ast.FuncDecl, servers map[*types.TypeName]*registrar) {
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
-		lit, ok := n.(*ast.FuncLit)
-		if !ok {
-			return true
-		}
-		sig, _ := info.TypeOf(lit).(*types.Signature)
-		if sig == nil {
-			return true
-		}
-		for i := 0; i < sig.Params().Len(); i++ {
-			st, ok := sig.Params().At(i).Type().Underlying().(*types.Struct)
-			if !ok {
-				continue
-			}
-			for j := 0; j < st.NumFields(); j++ {
-				if named, ok := types.Unalias(st.Field(j).Type()).(*types.Named); ok {
-					if r := servers[named.Obj()]; r != nil {
-						ix.fxRegistrars[fn] = append(ix.fxRegistrars[fn], r)
-					}
-				}
-			}
-		}
-		return true
-	})
-}
-
-// flow records that an expression of type src is used where the interface type dst is expected.
-func (ix *registrationIndex) flow(dst, src types.Type) {
-	if dst == nil || src == nil || !isInterfaceType(dst) || types.Identical(dst, src) {
-		return
-	}
-	if dst.Underlying().(*types.Interface).NumMethods() == 0 {
-		return
-	}
-	switch s := types.Unalias(src).(type) {
-	case *types.Basic:
-		if s.Kind() == types.UntypedNil || s.Kind() == types.Invalid {
-			return
-		}
-	case *types.Tuple:
-		return
-	}
-	set := ix.flows[typeKey(dst)]
-	if set == nil {
-		set = &typeSet{}
-		ix.flows[typeKey(dst)] = set
-	}
-	set.add(src)
-}
-
-// isFxInType reports whether t is fx.In or dig.In, the marker fx parameter structs embed.
-func isFxInType(t types.Type) bool {
-	return isNamedType(t, "go.uber.org/fx", "In") || isNamedType(t, "go.uber.org/dig", "In")
-}
-
-// selectedField returns the key of the struct field e selects, if e is a field selector.
-func selectedField(info *types.Info, e ast.Expr) (key string, ok bool) {
-	sel, isSel := ast.Unparen(e).(*ast.SelectorExpr)
-	if !isSel {
-		return "", false
-	}
-	selection := info.Selections[sel]
-	if selection == nil || selection.Kind() != types.FieldVal {
-		return "", false
-	}
-	return fieldKeyOf(selection.Recv(), selection.Index())
-}
-
-// collectFlows records, for root, the type-keyed flows (arguments, returns, assignments, variable
-// declarations, composite literals, conversions and fx.Annotate(f, fx.As(new(I)))) and the
-// stores into struct fields. scope is the top-level declaration root belongs to; sig is the
-// signature of the function root is the body of, or nil.
-func (ix *registrationIndex) collectFlows(info *types.Info, scope ast.Node, sig *types.Signature, root ast.Node) {
-	sigs := []*types.Signature{sig}
-	var visit func(n ast.Node) bool
-	visit = func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.FuncLit:
-			if litSig, ok := info.TypeOf(x).(*types.Signature); ok && x.Body != nil {
-				sigs = append(sigs, litSig)
-				ast.Inspect(x.Body, visit)
-				sigs = sigs[:len(sigs)-1]
-				return false
-			}
-		case *ast.ReturnStmt:
-			cur := sigs[len(sigs)-1]
-			if cur == nil {
-				break
-			}
-			res := cur.Results()
-			if res.Len() == len(x.Results) {
-				for i, e := range x.Results {
-					ix.flow(res.At(i).Type(), info.TypeOf(e))
-				}
-			} else if len(x.Results) == 1 {
-				if tup, ok := info.TypeOf(x.Results[0]).(*types.Tuple); ok && tup.Len() == res.Len() {
-					for i := 0; i < tup.Len(); i++ {
-						ix.flow(res.At(i).Type(), tup.At(i).Type())
-					}
-				}
-			}
-		case *ast.AssignStmt:
-			if x.Tok != token.ASSIGN {
-				break
-			}
-			for i, lhs := range x.Lhs {
-				key, ok := selectedField(info, lhs)
-				if !ok {
-					continue
-				}
-				switch {
-				case len(x.Lhs) == len(x.Rhs):
-					ix.fieldStores[key] = append(ix.fieldStores[key], fieldStore{info: info, scope: scope, expr: x.Rhs[i], index: -1})
-				case len(x.Rhs) == 1:
-					ix.fieldStores[key] = append(ix.fieldStores[key], fieldStore{info: info, scope: scope, expr: x.Rhs[0], index: i, numResults: len(x.Lhs)})
-				default:
-					ix.openFields[key] = true
-				}
-			}
-			if len(x.Lhs) == len(x.Rhs) {
-				for i := range x.Lhs {
-					ix.flow(info.TypeOf(x.Lhs[i]), info.TypeOf(x.Rhs[i]))
-				}
-			} else if len(x.Rhs) == 1 {
-				if tup, ok := info.TypeOf(x.Rhs[0]).(*types.Tuple); ok && tup.Len() == len(x.Lhs) {
-					for i := range x.Lhs {
-						ix.flow(info.TypeOf(x.Lhs[i]), tup.At(i).Type())
-					}
-				}
-			}
-		case *ast.UnaryExpr:
-			if x.Op == token.AND {
-				if key, ok := selectedField(info, x.X); ok {
-					ix.openFields[key] = true
-				}
-			}
-		case *ast.RangeStmt:
-			for _, target := range []ast.Expr{x.Key, x.Value} {
-				if target == nil {
-					continue
-				}
-				if key, ok := selectedField(info, target); ok {
-					ix.openFields[key] = true
-				}
-			}
-		case *ast.StructType:
-			st, ok := info.TypeOf(x).(*types.Struct)
-			if !ok {
-				break
-			}
-			for i := 0; i < st.NumFields(); i++ {
-				if st.Field(i).Embedded() && isFxInType(st.Field(i).Type()) {
-					for j := 0; j < st.NumFields(); j++ {
-						ix.openFields[fieldKey(st, st.Field(j).Name())] = true
-					}
-					break
-				}
-			}
-		case *ast.ValueSpec:
-			if x.Type != nil && len(x.Values) == len(x.Names) {
-				for i, v := range x.Values {
-					// "var _ I = (*T)(nil)" asserts that T implements I; no value is kept.
-					if x.Names[i].Name != "_" {
-						ix.flow(info.TypeOf(x.Type), info.TypeOf(v))
-					}
-				}
-			}
-		case *ast.CompositeLit:
-			ix.collectCompositeLitFlows(info, scope, x)
-		case *ast.CallExpr:
-			ix.collectCallFlows(info, x)
-		}
-		return true
-	}
-	ast.Inspect(root, visit)
-}
-
-func (ix *registrationIndex) collectCompositeLitFlows(info *types.Info, scope ast.Node, lit *ast.CompositeLit) {
-	t := info.TypeOf(lit)
-	if t == nil {
-		return
-	}
-	switch u := t.Underlying().(type) {
-	case *types.Struct:
-		store := func(field *types.Var, value ast.Expr) {
-			ix.flow(field.Type(), info.TypeOf(value))
-			key := fieldKey(u, field.Name())
-			ix.fieldStores[key] = append(ix.fieldStores[key], fieldStore{info: info, scope: scope, expr: value, index: -1})
-		}
-		for i, el := range lit.Elts {
-			if kv, ok := el.(*ast.KeyValueExpr); ok {
-				key, ok := kv.Key.(*ast.Ident)
-				if !ok {
-					continue
-				}
-				for j := 0; j < u.NumFields(); j++ {
-					if u.Field(j).Name() == key.Name {
-						store(u.Field(j), kv.Value)
-					}
-				}
-			} else if i < u.NumFields() {
-				store(u.Field(i), el)
-			}
-		}
-	case *types.Slice:
-		for _, el := range lit.Elts {
-			if kv, ok := el.(*ast.KeyValueExpr); ok {
-				el = kv.Value
-			}
-			ix.flow(u.Elem(), info.TypeOf(el))
-		}
-	case *types.Array:
-		for _, el := range lit.Elts {
-			if kv, ok := el.(*ast.KeyValueExpr); ok {
-				el = kv.Value
-			}
-			ix.flow(u.Elem(), info.TypeOf(el))
-		}
-	case *types.Map:
-		for _, el := range lit.Elts {
-			if kv, ok := el.(*ast.KeyValueExpr); ok {
-				ix.flow(u.Elem(), info.TypeOf(kv.Value))
-			}
-		}
-	}
-}
-
-func isFxFunc(fn *types.Func, name string) bool {
-	return fn != nil && fn.Pkg() != nil && fn.Name() == name && stripVendor(fn.Pkg().Path()) == "go.uber.org/fx"
-}
-
-func (ix *registrationIndex) collectCallFlows(info *types.Info, call *ast.CallExpr) {
-	if tv, ok := info.Types[call.Fun]; ok && tv.IsType() {
-		// A conversion I(x).
-		if len(call.Args) == 1 {
-			ix.flow(tv.Type, info.TypeOf(call.Args[0]))
-		}
-		return
-	}
-	sig, _ := info.TypeOf(call.Fun).(*types.Signature)
-	if sig == nil {
-		return
-	}
-	numParams := sig.Params().Len()
-	for i, arg := range call.Args {
-		switch {
-		case i < numParams-1 || (i < numParams && !sig.Variadic()):
-			ix.flow(sig.Params().At(i).Type(), info.TypeOf(arg))
-		case sig.Variadic() && numParams > 0 && call.Ellipsis == token.NoPos:
-			if sl, ok := sig.Params().At(numParams - 1).Type().(*types.Slice); ok {
-				ix.flow(sl.Elem(), info.TypeOf(arg))
-			}
-		}
-	}
-	// fx.Annotate(f, fx.As(new(I))): f's results are provided as I.
-	if !isFxFunc(typeutil.StaticCallee(info, call), "Annotate") || len(call.Args) < 2 {
-		return
-	}
-	provided, _ := info.TypeOf(call.Args[0]).(*types.Signature)
-	if provided == nil {
-		return
-	}
-	for _, arg := range call.Args[1:] {
-		as, ok := arg.(*ast.CallExpr)
-		if !ok || !isFxFunc(typeutil.StaticCallee(info, as), "As") {
-			continue
-		}
-		for _, target := range as.Args {
-			ptr, ok := info.TypeOf(target).(*types.Pointer)
-			if !ok || !isInterfaceType(ptr.Elem()) {
-				continue
-			}
-			iface := ptr.Elem().Underlying().(*types.Interface)
-			for i := 0; i < provided.Results().Len(); i++ {
-				if rt := provided.Results().At(i).Type(); types.Implements(rt, iface) {
-					ix.flow(ptr.Elem(), rt)
-				}
-			}
-		}
-	}
-}
-
-// concreteTypes returns the non-interface types that reach the interface type t through
-// type-keyed flows.
-func (ix *registrationIndex) concreteTypes(t types.Type) []types.Type {
-	var out typeSet
-	seen := make(map[string]bool)
-	var visit func(t types.Type, depth int)
-	visit = func(t types.Type, depth int) {
-		k := typeKey(t)
-		if seen[k] || depth > _maxFlowDepth {
-			return
-		}
-		seen[k] = true
-		if !isInterfaceType(t) {
-			if _, isParam := types.Unalias(t).(*types.TypeParam); !isParam {
-				out.add(t)
-			}
-			return
-		}
-		if set := ix.flows[k]; set != nil {
-			for _, src := range set.types {
-				visit(src, depth+1)
-			}
-		}
-	}
-	visit(t, 0)
-	return out.types
-}
-
-// exprTypes returns the concrete types the expression e may hold. scope is the top-level
-// declaration e appears in.
+// handlersOf returns the hand-written methods of t that implement r's server interface, one
+// registeredHandler per method, in the interface's method order.
 //
-//   - A non-interface expression has its static type.
-//   - An interface-typed call of a statically known function is resolved through that function's
-//     return statements.
-//   - An interface-typed local variable that is assigned once and never has its address taken is
-//     resolved through the assigned expression.
-//   - An interface-typed struct field is resolved through the expressions stored into it, unless
-//     its address is taken or fx populates its struct.
-//   - Anything else is resolved by type.
-func (ix *registrationIndex) exprTypes(info *types.Info, scope ast.Node, e ast.Expr, depth int) []types.Type {
-	e = ast.Unparen(e)
-	t := info.TypeOf(e)
-	if t == nil {
-		return nil
-	}
-	if b, ok := types.Unalias(t).(*types.Basic); ok && (b.Kind() == types.UntypedNil || b.Kind() == types.Invalid) {
-		return nil
-	}
-	if !isInterfaceType(t) {
-		if _, isParam := types.Unalias(t).(*types.TypeParam); isParam {
-			return nil
-		}
-		return []types.Type{t}
-	}
-	if depth < _maxResolveDepth {
-		switch x := e.(type) {
-		case *ast.CallExpr:
-			if out, ok := ix.returnedTypes(info, x, 0, 1, depth); ok {
-				return out
-			}
-		case *ast.Ident:
-			if v, ok := info.Uses[x].(*types.Var); ok {
-				if out, ok := ix.localVarTypes(info, scope, v, depth); ok {
-					return out
-				}
-			}
-		case *ast.SelectorExpr:
-			if key, ok := selectedField(info, x); ok {
-				if out, ok := ix.fieldTypes(key, t, depth); ok {
-					return out
-				}
-			}
-		}
-	}
-	return ix.concreteTypes(t)
-}
-
-// fieldTypes resolves the struct field key, of interface type t, through the expressions stored
-// into it. ok is false if the field has no visible store or is open (see openFields).
-func (ix *registrationIndex) fieldTypes(key string, t types.Type, depth int) (out []types.Type, ok bool) {
-	stores := ix.fieldStores[key]
-	if len(stores) == 0 || ix.openFields[key] {
-		return nil, false
-	}
-	var set typeSet
-	for _, s := range stores {
-		var resolved []types.Type
-		if s.index < 0 {
-			resolved = ix.exprTypes(s.info, s.scope, s.expr, depth+1)
-		} else {
-			call, isCall := ast.Unparen(s.expr).(*ast.CallExpr)
-			done := false
-			if isCall {
-				resolved, done = ix.returnedTypes(s.info, call, s.index, s.numResults, depth+1)
-			}
-			if !done {
-				resolved = ix.concreteTypes(t)
-			}
-		}
-		for _, r := range resolved {
-			set.add(r)
-		}
-	}
-	return set.types, true
-}
-
-// localVarTypes resolves the local variable v through its only assignment in scope. ok is false
-// if v is not a local variable, is assigned more than once, or has its address taken.
-func (ix *registrationIndex) localVarTypes(info *types.Info, scope ast.Node, v *types.Var, depth int) (out []types.Type, ok bool) {
-	if scope == nil || v.IsField() || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
-		return nil, false
-	}
-	var (
-		rhs      ast.Expr
-		index    int // result index if rhs is a call that yields several values, else -1
-		numLHS   int
-		numDefs  int
-		escapes  bool
-		isTarget = func(e ast.Expr) bool {
-			id, isIdent := ast.Unparen(e).(*ast.Ident)
-			return isIdent && (info.Defs[id] == v || info.Uses[id] == v)
-		}
-	)
-	ast.Inspect(scope, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.AssignStmt:
-			for i, lhs := range x.Lhs {
-				if !isTarget(lhs) {
-					continue
-				}
-				numDefs++
-				switch {
-				case len(x.Lhs) == len(x.Rhs):
-					rhs, index = x.Rhs[i], -1
-				case len(x.Rhs) == 1:
-					rhs, index, numLHS = x.Rhs[0], i, len(x.Lhs)
-				}
-			}
-		case *ast.ValueSpec:
-			for i, name := range x.Names {
-				if info.Defs[name] != v {
-					continue
-				}
-				numDefs++
-				switch {
-				case len(x.Values) == len(x.Names):
-					rhs, index = x.Values[i], -1
-				case len(x.Values) == 1:
-					rhs, index, numLHS = x.Values[0], i, len(x.Names)
-				}
-			}
-		case *ast.RangeStmt:
-			if (x.Key != nil && isTarget(x.Key)) || (x.Value != nil && isTarget(x.Value)) {
-				escapes = true
-			}
-		case *ast.UnaryExpr:
-			if x.Op == token.AND && isTarget(x.X) {
-				escapes = true
-			}
-		}
-		return true
-	})
-	if escapes || numDefs != 1 || rhs == nil {
-		return nil, false
-	}
-	if index < 0 {
-		return ix.exprTypes(info, scope, rhs, depth+1), true
-	}
-	call, isCall := ast.Unparen(rhs).(*ast.CallExpr)
-	if !isCall {
-		return nil, false
-	}
-	return ix.returnedTypes(info, call, index, numLHS, depth)
-}
-
-// returnedTypes resolves result number index of a call of a statically known, non-generic
-// function with numResults unnamed results through the function's return statements. ok is
-// false if the call is not of that form.
-func (ix *registrationIndex) returnedTypes(info *types.Info, call *ast.CallExpr, index, numResults, depth int) (out []types.Type, ok bool) {
-	callee := typeutil.StaticCallee(info, call)
-	if callee == nil {
-		return nil, false
-	}
-	d, found := ix.decls[callee]
-	if !found {
-		return nil, false
-	}
-	sig := callee.Type().(*types.Signature)
-	if sig.Results().Len() != numResults || sig.Results().At(0).Name() != "" || sig.TypeParams().Len() > 0 || sig.RecvTypeParams().Len() > 0 {
-		return nil, false
-	}
-	var set typeSet
-	resolved, numReturns := true, 0
-	ast.Inspect(d.decl.Body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.FuncLit:
-			return false
-		case *ast.ReturnStmt:
-			numReturns++
-			if len(x.Results) != numResults {
-				resolved = false
-				return false
-			}
-			for _, t := range ix.exprTypes(d.info, d.decl, x.Results[index], depth+1) {
-				set.add(t)
-			}
-		}
-		return resolved
-	})
-	if !resolved || numReturns == 0 {
-		return nil, false
-	}
-	return set.types, true
-}
-
-// resolveMethod returns the concrete methods that a call of the interface method m on a value of
-// type t runs. A method promoted from an embedded interface field is resolved through the values
-// of that field (see fieldTypes), or through the concrete types that flow into the field's
-// interface type if the field's stores cannot be used. visited holds the types already resolved
-// for m.
-func (ix *registrationIndex) resolveMethod(t types.Type, m *types.Func, visited map[string]bool) []*types.Func {
-	if k := typeKey(t); visited[k] {
-		return nil
-	} else {
-		visited[k] = true
-	}
-	obj, path, _ := types.LookupFieldOrMethod(t, true /* addressable */, m.Pkg(), m.Name())
-	fn, ok := obj.(*types.Func)
-	if !ok {
-		return nil
-	}
-	recv := fn.Type().(*types.Signature).Recv()
-	if recv == nil {
-		return nil
-	}
-	if !isInterfaceType(recv.Type()) {
-		return []*types.Func{fn}
-	}
-	// The method is promoted from an embedded interface field: path leads to that field and
-	// ends with the method's index in the interface.
-	var values []types.Type
-	resolved := false
-	if len(path) >= 2 {
-		if key, ok := fieldKeyOf(t, path[:len(path)-1]); ok {
-			values, resolved = ix.fieldTypes(key, recv.Type(), 0)
-		}
-	}
-	if !resolved {
-		values = ix.concreteTypes(recv.Type())
-	}
-	var out []*types.Func
-	for _, c := range values {
-		out = append(out, ix.resolveMethod(c, m, visited)...)
-	}
-	return out
-}
-
-// handlersOf returns the hand-written methods of t that implement r's server interface.
+//	type kvServer struct{ pb.UnimplementedKVServer }
+//	func (s *kvServer) Get(...)
+//	handlersOf(*kvServer, RegisterKVServer)       -> [Get]; Put resolves to the generated
+//	                                                 Unimplemented method and is dropped
+//	handlersOf(*tchanKVClient, NewTChanKVServer)  -> []: TChannel and Apache Thrift use one
+//	                                                 interface for both sides, and the generated
+//	                                                 client's methods are not handlers
+//	mustEmbedUnimplementedKVServer                -> dropped: a protoc-gen-go-grpc marker, never
+//	                                                 an RPC
 func (ix *registrationIndex) handlersOf(t types.Type, r *registrar, site token.Pos) []registeredHandler {
 	var out []registeredHandler
 	iface := r.server.Underlying().(*types.Interface)
@@ -934,6 +224,24 @@ func (ix *registrationIndex) handlersOf(t types.Type, r *registrar, site token.P
 // registeredHandlers returns the handler methods reachable from the registration sites in
 // allPkgs. A handler is kept if its registration site or the handler itself is in a package
 // accepted by inCodebase.
+//
+// Three kinds of site are recognized, in every top-level declaration of every package:
+//
+//	pb.RegisterKVServer(s, srv)                 (a) registrar call: srv is resolved with exprTypes
+//	fx.Provide(kvserver.New)                    (b) registrar used as a value: the handler arrives
+//	                                                by type, so every type that flows into the
+//	                                                server interface is registered
+//	fx.Provide(kvpb.NewFxKVYARPCProcedures())   (c) call, from hand-written code, of a generated
+//	                                                fx registrar: as (b), for each registrar its
+//	                                                closure wraps
+//
+// Not sites: the body of an fx registrar itself (its registrar call runs only when the fx
+// registrar is used, and is attributed to the calls of kind (c)); a call of an fx registrar from
+// generated code; the callee identifier of a call of kind (a), which would otherwise also match
+// (b). An identifier is told to be a callee because the call expression is visited before its
+// function expression.
+//
+// Handlers are de-duplicated by method; the first site found keeps the attribution.
 func (ix *registrationIndex) registeredHandlers(allPkgs []*packages.Package, inCodebase func(pkgPath string) bool) []registeredHandler {
 	var out []registeredHandler
 	seen := make(map[*types.Func]bool)
@@ -1011,6 +319,15 @@ func (ix *registrationIndex) registeredHandlers(allPkgs []*packages.Package, inC
 // registrationInbounds returns the inbound points found from registration sites. The codebase is
 // the set of packages under the configured codebase prefix; without a prefix it is codebasePkgs,
 // the packages the entry package's path selects.
+//
+//	codebasePkgPrefix ""                   handlers whose site or declaration is in codebasePkgs
+//	codebasePkgPrefix "go.etcd.io/etcd"    handlers whose site or declaration is under the
+//	                                       prefix and not in an infra package
+//
+// Each handler becomes one InboundPoint. Its canonical name pairs the service name of the server
+// interface's package with the method: (*kvServer).Get registered by pb.RegisterKVServer gets
+// canonicalEndpoint(registrationServiceName(pb.KVServer), "Get"). Handlers declared in infra
+// packages are dropped even when their registration site is in the codebase.
 func (f *Finder) registrationInbounds(allPkgs, codebasePkgs []*packages.Package, pkgMap map[string]*packages.Package) []fty.InboundPoint {
 	inCodebaseSet := make(map[string]bool, len(codebasePkgs))
 	for _, pkg := range codebasePkgs {
@@ -1053,9 +370,17 @@ func (f *Finder) registrationInbounds(allPkgs, codebasePkgs []*packages.Package,
 	return out
 }
 
-// registrationServiceName returns the canonical service name for a server interface: the name
-// the generated package declares where the package follows the gogoproto/thriftrw layout, and
-// the interface's package path otherwise.
+// registrationServiceName returns the canonical service name for a server interface.
+//
+//	gogoproto/kv/kvpb.KVYARPCServer                            gogoproto layout
+//	        -> the service name canonicalServiceName reads from package kvpb
+//	thriftrw/kv/kvserver.Interface                             thriftrw "server" subpackage
+//	        -> the name read from the parent package thriftrw/kv, if that package is loaded
+//	google.golang.org/grpc/health/grpc_health_v1.HealthServer  no gogoproto/thriftrw layout
+//	        -> the package path itself
+//
+// The package path is the fallback whenever the interface's package is not loaded, does not
+// follow a generated layout, or canonicalServiceName fails on it.
 func (f *Finder) registrationServiceName(server *types.Named, pkgMap map[string]*packages.Package) string {
 	path := server.Obj().Pkg().Path()
 	ifacePkg := pkgMap[path]

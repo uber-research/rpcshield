@@ -160,11 +160,19 @@ the handler argument's static type:
 What they miss: an argument that is a variable or a field, a constructor behind another
 constructor, and handlers that arrive through fx.
 
-### 2.4 Rule: registration-rooted, following values (`registration.go`)
+### 2.4 Rule: registration-rooted, following values (`registration*.go`)
 
 On by default (`config.Config.DisableRegistrationInboundDetection` turns it off). This rule
 generalizes 2.3 to every stack in section 1.1 and follows the registered value where the syntax
 shows it. It adds to the handlers found by 2.2 and 2.3; an existing entry is never changed.
+
+The code is split by concern: `registration_shape.go` recognizes generated files and registrar
+signatures; `registration_flows.go` gathers, in one pass over the program, which static types
+reach each interface type and which expressions are stored into each struct field;
+`registration_resolve.go` resolves a registered value to concrete types and an interface method
+to the method that runs; `registration.go` holds the index, the site discovery and the
+conversion to inbound points. Every function that inspects syntax or types carries examples of
+the source it accepts and rejects, and of what it returns for each.
 
 1. **Registrars** are generated functions whose signature has one of the shapes in the table of
    section 1.1 (`registrarShapeOf`). Recognition is by the framework types in the signature,
@@ -249,7 +257,7 @@ directly (`http.RoundTripper.RoundTrip`, `net/rpc.Client.Call`).
 
 ### 4.1 A new RPC stack with generated code
 
-Add its registrar shape to `registrarShapeOf` in `registration.go`: match the framework types
+Add its registrar shape to `registrarShapeOf` in `registration_shape.go`: match the framework types
 that appear in the signature (use `isNamedType` with the framework's import path; `stripVendor`
 handles vendoring), return the handler parameter's index and the endpoint type, and add the
 endpoint type to `finder/types/endpointtype.go` if it is new. Everything else (sites, value
